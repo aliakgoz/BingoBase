@@ -121,12 +121,6 @@ export default function App() {
     return inWindow && !joined && !round.finalized;
   }, [round, joined, nowSec]);
 
-  const joinLeftSec = useMemo(() => {
-    if (!round) return 0;
-    const left = Number(round.joinDeadline) - nowSec;
-    return Math.max(0, left);
-  }, [round, nowSec]);
-
   const drawnSet = useMemo(() => {
     const set = new Set<number>();
     if (!round) return set;
