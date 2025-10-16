@@ -248,26 +248,25 @@ export default function App() {
 
   // event subscriptions (optional)
   useEffect(() => {
-    if (!bingoWs) return;
-    const onDraw = async (roundId: any, number: any, drawIndex: any) => {
-      // immediate UI refresh on draw
-      await pullOnce();
-    };
-    const onVRF = async () => await pullOnce();
-    const onCreated = async () => await pullOnce();
-    const onPayout = async () => await pullOnce();
+  if (!bingoWs) return;
 
-    bingoWs.on("Draw", onDraw);
-    bingoWs.on("VRFFulfilled", onVRF);
-    bingoWs.on("RoundCreated", onCreated);
-    bingoWs.on("Payout", onPayout);
+  // Ignore event args so TS won't complain when noUnusedParameters is enabled
+  const onDraw     = async (..._args: any[]) => { await pullOnce(); };
+  const onVRF      = async (..._args: any[]) => { await pullOnce(); };
+  const onCreated  = async (..._args: any[]) => { await pullOnce(); };
+  const onPayout   = async (..._args: any[]) => { await pullOnce(); };
 
-    return () => {
-      bingoWs.off("Draw", onDraw);
-      bingoWs.off("VRFFulfilled", onVRF);
-      bingoWs.off("RoundCreated", onCreated);
-      bingoWs.off("Payout", onPayout);
-    };
+  bingoWs.on("Draw", onDraw);
+  bingoWs.on("VRFFulfilled", onVRF);
+  bingoWs.on("RoundCreated", onCreated);
+  bingoWs.on("Payout", onPayout);
+
+  return () => {
+    bingoWs.off("Draw", onDraw);
+    bingoWs.off("VRFFulfilled", onVRF);
+    bingoWs.off("RoundCreated", onCreated);
+    bingoWs.off("Payout", onPayout);
+  };
   }, [bingoWs]);
 
   // helpers
@@ -480,6 +479,8 @@ function Header() {
   );
 }
 
+
+
 function TopBar({
   account,
   onConnect,
@@ -675,3 +676,5 @@ const btnGhost: React.CSSProperties = {
   color: "#111",
   fontWeight: 600,
 };
+
+
