@@ -1,22 +1,15 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import {
-  BrowserProvider,
-  Contract,
-  JsonRpcProvider,
-  WebSocketProvider,
-  formatUnits,
-  parseUnits,
-} from "ethers";
+import { BrowserProvider, Contract, JsonRpcProvider, WebSocketProvider, formatUnits, parseUnits } from "ethers";
 
-// ===== ENV (BUILD-TIME) =====
+// ===== ENV =====
 const CONTRACT_ADDRESS = import.meta.env.VITE_CONTRACT_ADDRESS as string;
 const USDC_ADDRESS     = import.meta.env.VITE_USDC_ADDRESS as string;
 const RPC_URL          = (import.meta.env.VITE_RPC_URL as string) || "";
-const RPC_WSS          = (import.meta.env.VITE_RPC_WSS as string) || ""; // optional for events
+const RPC_WSS          = (import.meta.env.VITE_RPC_WSS as string) || ""; // optional
 
-const BASE_BLUE   = "#0052FF";
-const MAX_NUMBER  = 90;
-const CARD_SIZE   = 24;
+const BASE_BLUE  = "#0052FF";
+const MAX_NUMBER = 90;
+const CARD_SIZE  = 24;
 
 // ===== Minimal ABIs =====
 const BINGO_ABI = [
@@ -40,10 +33,10 @@ const BINGO_ABI = [
   )`,
   `function cardOf(uint256 roundId, address player) view returns (uint8[${CARD_SIZE}])`,
 
-  // writes (only join is exposed to users)
+  // writes (only join is user-triggered)
   "function joinRound(uint256 roundId) external",
 
-  // admin/bot (UI does not call these, but ABI is needed to subscribe events)
+  // admin/bot (not used by UI; kept so events type-check)
   "function requestRandomness(uint256 roundId) external",
   "function drawNext(uint256 roundId) external",
   "function claimBingo(uint256 roundId) external",
@@ -80,26 +73,13 @@ type RoundInfo = {
 };
 
 function useProviders() {
-  // read over HTTPS
-  const read = useMemo(
-    () => (RPC_URL ? new JsonRpcProvider(RPC_URL) : undefined),
-    []
-  );
-
-  // optional read over WSS (events)
-  const readWs = useMemo(
-    () => (RPC_WSS ? new WebSocketProvider(RPC_WSS) : undefined),
-    []
-  );
-
-  // write (wallet)
+  const read = useMemo(() => (RPC_URL ? new JsonRpcProvider(RPC_URL) : undefined), []);
+  const readWs = useMemo(() => (RPC_WSS ? new WebSocketProvider(RPC_WSS) : undefined), []);
   const [write, setWrite] = useState<BrowserProvider>();
   useEffect(() => {
-    if ((window as any).ethereum) {
-      setWrite(new BrowserProvider((window as any).ethereum));
-    }
+    const eth = (window as any).ethereum;
+    if (eth) setWrite(new BrowserProvider(eth));
   }, []);
-
   return { read, readWs, write };
 }
 
@@ -112,7 +92,7 @@ export default function App() {
 
   // contracts
   const [bingo, setBingo] = useState<Contract>();
-  const [bingoWs, setBingoWs] = useState<Contract>(); // for events
+  const [bingoWs, setBingoWs] = useState<Contract>();
   const [usdc, setUsdc] = useState<Contract>();
 
   // state
@@ -126,15 +106,12 @@ export default function App() {
   const [card, setCard] = useState<number[]>([]);
   const [loadingTx, setLoadingTx] = useState<string>("");
 
-  // helpers
-  const nowSec = Math.floor(Date.now() / 1000);
   const pulling = useRef(false);
+  const nowSec = Math.floor(Date.now() / 1000);
 
   const canJoin = useMemo(() => {
     if (!round) return false;
-    const inWindow =
-      Number(round.startTime) <= nowSec &&
-      nowSec < Number(round.joinDeadline);
+    const inWindow = Number(round.startTime) <= nowSec && nowSec < Number(round.joinDeadline);
     return inWindow && !joined && !round.finalized;
   }, [round, joined, nowSec]);
 
@@ -149,22 +126,13 @@ export default function App() {
     return set;
   }, [round]);
 
-  const lastDrawnList = useMemo(
-    () => Array.from(drawnSet).sort((a, b) => a - b).slice(-10),
-    [drawnSet]
-  );
+  const lastDrawnList = useMemo(() => Array.from(drawnSet).sort((a, b) => a - b).slice(-10), [drawnSet]);
 
   // init contracts
   useEffect(() => {
-    if (read && CONTRACT_ADDRESS) {
-      setBingo(new Contract(CONTRACT_ADDRESS, BINGO_ABI, read));
-    }
-    if (readWs && CONTRACT_ADDRESS) {
-      setBingoWs(new Contract(CONTRACT_ADDRESS, BINGO_ABI, readWs));
-    }
-    if (read && USDC_ADDRESS) {
-      setUsdc(new Contract(USDC_ADDRESS, ERC20_ABI, read));
-    }
+    if (read && CONTRACT_ADDRESS) setBingo(new Contract(CONTRACT_ADDRESS, BINGO_ABI, read));
+    if (readWs && CONTRACT_ADDRESS) setBingoWs(new Contract(CONTRACT_ADDRESS, BINGO_ABI, readWs));
+    if (read && USDC_ADDRESS) setUsdc(new Contract(USDC_ADDRESS, ERC20_ABI, read));
   }, [read, readWs]);
 
   // wallet connect
@@ -176,7 +144,7 @@ export default function App() {
     setChainId(Number(net.chainId));
   };
 
-  // shared pull
+  // unified pull
   const pullOnce = async () => {
     if (!bingo || pulling.current) return;
     pulling.current = true;
@@ -213,7 +181,6 @@ export default function App() {
         try {
           const players: string[] = await bingo.playersOf(rid);
           setJoined(players.map((p) => p.toLowerCase()).includes(account.toLowerCase()));
-
           const r = (await bingo.roundInfo(rid)) as unknown as RoundInfo;
           if (r.randomness !== 0n) {
             const raw: number[] = await bingo.cardOf(rid, account);
@@ -246,45 +213,39 @@ export default function App() {
     return () => window.clearTimeout(t);
   }, [bingo, usdc, account]);
 
-  // event subscriptions (optional)
+  // event subscriptions (WSS optional)
   useEffect(() => {
-  if (!bingoWs) return;
+    if (!bingoWs) return;
 
-  // Ignore event args so TS won't complain when noUnusedParameters is enabled
-  const onDraw     = async (..._args: any[]) => { await pullOnce(); };
-  const onVRF      = async (..._args: any[]) => { await pullOnce(); };
-  const onCreated  = async (..._args: any[]) => { await pullOnce(); };
-  const onPayout   = async (..._args: any[]) => { await pullOnce(); };
+    const onAny = async (..._args: any[]) => { await pullOnce(); };
 
-  bingoWs.on("Draw", onDraw);
-  bingoWs.on("VRFFulfilled", onVRF);
-  bingoWs.on("RoundCreated", onCreated);
-  bingoWs.on("Payout", onPayout);
+    bingoWs.on("Draw", onAny);
+    bingoWs.on("VRFFulfilled", onAny);
+    bingoWs.on("RoundCreated", onAny);
+    bingoWs.on("Payout", onAny);
 
-  return () => {
-    bingoWs.off("Draw", onDraw);
-    bingoWs.off("VRFFulfilled", onVRF);
-    bingoWs.off("RoundCreated", onCreated);
-    bingoWs.off("Payout", onPayout);
-  };
+    return () => {
+      bingoWs.off("Draw", onAny);
+      bingoWs.off("VRFFulfilled", onAny);
+      bingoWs.off("RoundCreated", onAny);
+      bingoWs.off("Payout", onAny);
+    };
   }, [bingoWs]);
 
-  // helpers
+  // signer helper
   const withSigner = async (c: Contract) => {
     if (!write) throw new Error("No wallet");
     const signer = await write.getSigner();
     return c.connect(signer);
   };
 
+  // actions (join + approve only)
   const doApprove = async () => {
     if (!usdc) return;
     try {
       setLoadingTx("Approve...");
       const c = await withSigner(usdc);
-      const tx = await (c as any).approve(
-        CONTRACT_ADDRESS,
-        parseUnits("1000000000000", decimals)
-      );
+      const tx = await (c as any).approve(CONTRACT_ADDRESS, parseUnits("1000000000000", decimals));
       await tx.wait();
       await pullOnce();
     } catch (e: any) {
@@ -310,27 +271,20 @@ export default function App() {
   };
 
   const entryStr =
-    round && decimals != null
-      ? `${Number(formatUnits(round.entryFeeUSDC, decimals))} ${symbol}`
-      : "-";
+    round && decimals != null ? `${Number(formatUnits(round.entryFeeUSDC, decimals))} ${symbol}` : "-";
   const prizeStr =
-    round && decimals != null
-      ? `${Number(formatUnits(round.prizePoolUSDC, decimals)).toFixed(2)} ${symbol}`
-      : "-";
+    round && decimals != null ? `${Number(formatUnits(round.prizePoolUSDC, decimals)).toFixed(2)} ${symbol}` : "-";
 
   const statusText = useMemo(() => {
     if (!round) return "-";
     if (round.finalized) return "Round finished";
     if (round.randomness === 0n) {
-      return nowSec < Number(round.joinDeadline)
-        ? "Join window open"
-        : "Waiting for VRF";
+      return nowSec < Number(round.joinDeadline) ? "Join window open" : "Waiting for VRF";
     }
     return `Drawing... (${round.drawCount}/${MAX_NUMBER})`;
   }, [round, nowSec]);
 
-  const explorerBase = (cid?: number) =>
-    cid === 8453 ? "https://basescan.org" : "https://sepolia.basescan.org";
+  const explorerBase = (cid?: number) => (cid === 8453 ? "https://basescan.org" : "https://sepolia.basescan.org");
 
   return (
     <div style={styles.wrap}>
@@ -339,7 +293,7 @@ export default function App() {
       <TopBar chainId={chainId} account={account} onConnect={connect} />
 
       {!RPC_URL && (
-        <div style={{background:"#fff4e5", border:"1px solid #ffd599", padding:12, borderRadius:10, marginBottom:12}}>
+        <div style={{ background: "#fff4e5", border: "1px solid #ffd599", padding: 12, borderRadius: 10, marginBottom: 12 }}>
           <b>RPC_URL missing.</b> Set VITE_RPC_URL in Vercel and redeploy.
         </div>
       )}
@@ -347,24 +301,19 @@ export default function App() {
       <section style={styles.hero}>
         <div>
           <h1 style={{ margin: 0, fontSize: 36 }}>BingoBase</h1>
-          <p style={{ marginTop: 8, opacity: 0.8 }}>
-            Provably fair on-chain Bingo on Base • Chainlink VRF v2.5
-          </p>
+          <p style={{ marginTop: 8, opacity: 0.8 }}>Provably fair on-chain Bingo on Base • Chainlink VRF v2.5</p>
         </div>
         <img src="/BingoBase4.png" alt="logo" style={{ height: 56 }} />
       </section>
 
       <section style={styles.columns}>
-        {/* Left */}
         <div style={styles.leftCol}>
           <Card title="Main Hall">
             <Row label="Current Round">{currentRoundId || "-"}</Row>
             <Row label="Entry Fee">{entryStr}</Row>
             <Row label="Prize Pool">{prizeStr}</Row>
             <Row label="Start">
-              {round
-                ? new Date(Number(round.startTime) * 1000).toLocaleString()
-                : "-"}
+              {round ? new Date(Number(round.startTime) * 1000).toLocaleString() : "-"}
             </Row>
             <Row label="Join Window">
               {round
@@ -377,19 +326,8 @@ export default function App() {
 
             <div style={{ display: "flex", gap: 8, marginTop: 12, flexWrap: "wrap" }}>
               <button
-                style={btnPrimary(
-                  !!account &&
-                    canJoin &&
-                    allowance >= (round?.entryFeeUSDC ?? 0n) &&
-                    loadingTx === ""
-                )}
-                disabled={
-                  !account ||
-                  !canJoin ||
-                  loadingTx !== "" ||
-                  !round ||
-                  allowance < (round?.entryFeeUSDC ?? 0n)
-                }
+                style={btnPrimary(!!account && canJoin && allowance >= (round?.entryFeeUSDC ?? 0n) && loadingTx === "")}
+                disabled={!account || !canJoin || loadingTx !== "" || !round || allowance < (round?.entryFeeUSDC ?? 0n)}
                 onClick={doJoin}
                 title={
                   !account
@@ -404,11 +342,7 @@ export default function App() {
                 {loadingTx === "Join..." ? "Joining..." : `Join • ${entryStr}`}
               </button>
 
-              <button
-                style={btnGhost}
-                disabled={!account || loadingTx !== "" || !round}
-                onClick={doApprove}
-              >
+              <button style={btnGhost} disabled={!account || loadingTx !== "" || !round} onClick={doApprove}>
                 {loadingTx === "Approve..." ? "Approving..." : `Approve ${symbol}`}
               </button>
             </div>
@@ -432,7 +366,6 @@ export default function App() {
           </Card>
         </div>
 
-        {/* Right */}
         <div style={styles.rightCol}>
           <Card title="Live Board (1–90)">
             <Grid90 drawn={drawnSet} />
@@ -441,7 +374,7 @@ export default function App() {
           <Card title="Your Card (24)">
             {card.length === 0 ? (
               <div style={{ opacity: 0.7 }}>
-                Your card appears after VRF (join first; card is derived deterministically from your address).
+                Your card appears after VRF (join first; the card is derived deterministically from your address).
               </div>
             ) : (
               <GridCard card={card} drawn={drawnSet} />
@@ -451,20 +384,8 @@ export default function App() {
       </section>
 
       <footer style={{ margin: "40px 0", fontSize: 12, opacity: 0.7 }}>
-        Contract:{" "}
-        <a
-          href={`${explorerBase(chainId)}/address/${CONTRACT_ADDRESS}`}
-          target="_blank"
-        >
-          {CONTRACT_ADDRESS}
-        </a>{" "}
-        · USDC:{" "}
-        <a
-          href={`${explorerBase(chainId)}/address/${USDC_ADDRESS}`}
-          target="_blank"
-        >
-          {USDC_ADDRESS}
-        </a>
+        Contract: <a href={`${explorerBase(chainId)}/address/${CONTRACT_ADDRESS}`} target="_blank">{CONTRACT_ADDRESS}</a> ·{" "}
+        USDC: <a href={`${explorerBase(chainId)}/address/${USDC_ADDRESS}`} target="_blank">{USDC_ADDRESS}</a>
       </footer>
     </div>
   );
@@ -479,44 +400,18 @@ function Header() {
   );
 }
 
-
-
-function TopBar({
-  account,
-  onConnect,
-  chainId,
-}: {
-  account?: string;
-  onConnect: () => void;
-  chainId?: number;
-}) {
+function TopBar({ account, onConnect, chainId }: { account?: string; onConnect: () => void; chainId?: number }) {
   return (
-    <div
-      style={{
-        display: "flex",
-        justifyContent: "space-between",
-        alignItems: "center",
-        marginBottom: 12,
-      }}
-    >
+    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
       <div style={{ fontWeight: 600 }}>Main Hall</div>
       <div style={{ display: "flex", gap: 12, alignItems: "center" }}>
         <span style={{ fontSize: 12, opacity: 0.7 }}>ChainId: {chainId ?? "-"}</span>
         {account ? (
-          <code
-            style={{
-              fontSize: 12,
-              background: "#f4f6fa",
-              padding: "6px 10px",
-              borderRadius: 8,
-            }}
-          >
+          <code style={{ fontSize: 12, background: "#f4f6fa", padding: "6px 10px", borderRadius: 8 }}>
             {account.slice(0, 6)}…{account.slice(-4)}
           </code>
         ) : (
-          <button style={btnPrimary(true)} onClick={onConnect}>
-            Connect Wallet
-          </button>
+          <button style={btnPrimary(true)} onClick={onConnect}>Connect Wallet</button>
         )}
       </div>
     </div>
@@ -526,14 +421,7 @@ function TopBar({
 function Card({ title, children }: { title: string; children: any }) {
   return (
     <div style={styles.card}>
-      <div
-        style={{
-          display: "flex",
-          justifyContent: "space-between",
-          alignItems: "center",
-          marginBottom: 12,
-        }}
-      >
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
         <h3 style={{ margin: 0, fontSize: 18 }}>{title}</h3>
       </div>
       {children}
@@ -543,14 +431,7 @@ function Card({ title, children }: { title: string; children: any }) {
 
 function Row({ label, children }: { label: string; children: any }) {
   return (
-    <div
-      style={{
-        display: "flex",
-        justifyContent: "space-between",
-        padding: "8px 0",
-        borderBottom: "1px solid #eff2f7",
-      }}
-    >
+    <div style={{ display: "flex", justifyContent: "space-between", padding: "8px 0", borderBottom: "1px solid #eff2f7" }}>
       <div style={{ opacity: 0.7 }}>{label}</div>
       <div style={{ fontWeight: 600 }}>{children}</div>
     </div>
@@ -567,9 +448,7 @@ function Grid90({ drawn }: { drawn: Set<number> }) {
             border: "1px solid #e6eaf2",
             borderRadius: 8,
             height: 32,
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
+            display: "flex", alignItems: "center", justifyContent: "center",
             background: drawn.has(n) ? BASE_BLUE : "#fff",
             color: drawn.has(n) ? "#fff" : "#111",
             fontWeight: 600,
@@ -592,13 +471,10 @@ function GridCard({ card, drawn }: { card: number[]; drawn: Set<number> }) {
             border: "1px solid #e6eaf2",
             borderRadius: 10,
             height: 44,
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
+            display: "flex", alignItems: "center", justifyContent: "center",
             background: drawn.has(n) ? BASE_BLUE : "#fff",
             color: drawn.has(n) ? "#fff" : "#111",
-            fontWeight: 700,
-            fontSize: 16,
+            fontWeight: 700, fontSize: 16,
           }}
         >
           {n}
@@ -612,12 +488,8 @@ function Ball({ n, active = false }: { n: number; active?: boolean }) {
   return (
     <div
       style={{
-        width: 34,
-        height: 34,
-        borderRadius: 17,
-        display: "flex",
-        alignItems: "center",
-        justifyContent: "center",
+        width: 34, height: 34, borderRadius: 17,
+        display: "flex", alignItems: "center", justifyContent: "center",
         background: active ? BASE_BLUE : "#fff",
         color: active ? "#fff" : "#111",
         border: "1px solid #e6eaf2",
@@ -631,28 +503,14 @@ function Ball({ n, active = false }: { n: number; active?: boolean }) {
 
 // ===== Styles =====
 const styles: Record<string, React.CSSProperties> = {
-  wrap: {
-    maxWidth: 1080,
-    margin: "24px auto",
-    padding: "0 16px",
-    fontFamily: "Inter, system-ui, Arial",
-  },
-  hero: {
-    display: "flex",
-    alignItems: "center",
-    justifyContent: "space-between",
-    margin: "8px 0 16px",
-  },
+  wrap: { maxWidth: 1080, margin: "24px auto", padding: "0 16px", fontFamily: "Inter, system-ui, Arial" },
+  hero: { display: "flex", alignItems: "center", justifyContent: "space-between", margin: "8px 0 16px" },
   columns: { display: "grid", gridTemplateColumns: "1.1fr .9fr", gap: 16 },
   leftCol: {},
   rightCol: {},
   card: {
-    padding: 16,
-    border: "1px solid #e6eaf2",
-    borderRadius: 16,
-    background: "#fff",
-    boxShadow: "0 1px 2px rgba(20,20,20,.03)",
-    marginBottom: 16,
+    padding: 16, border: "1px solid #e6eaf2", borderRadius: 16, background: "#fff",
+    boxShadow: "0 1px 2px rgba(20,20,20,.03)", marginBottom: 16
   },
 };
 
@@ -676,5 +534,3 @@ const btnGhost: React.CSSProperties = {
   color: "#111",
   fontWeight: 600,
 };
-
-
