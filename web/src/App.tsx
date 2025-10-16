@@ -140,9 +140,30 @@ export default function App() {
 
   // diagnostics
   const [latestBlock, setLatestBlock] = useState<number>(0);
+  const [diag, setDiag] = useState<{ hasCode?: boolean; chainId?: number; msg?: string }>({});
 
   const pulling = useRef(false);
   const nowSec  = Math.floor(Date.now() / 1000);
+
+  // === diagnose block: confirm RPC + bytecode at address ===
+  useEffect(() => {
+    (async () => {
+      try {
+        if (!RPC_URL || !CONTRACT_ADDRESS) return;
+        const p = new JsonRpcProvider(RPC_URL);
+        const [net, code] = await Promise.all([p.getNetwork(), p.getCode(CONTRACT_ADDRESS)]);
+        const hasCode = !!code && code !== "0x";
+        setDiag({
+          hasCode,
+          chainId: Number(net.chainId),
+          msg: hasCode ? undefined : "No bytecode at VITE_CONTRACT_ADDRESS on this RPC",
+        });
+        console.log("[diagnose] chainId =", Number(net.chainId), "hasCode =", hasCode);
+      } catch (e:any) {
+        setDiag({ msg: e?.message ?? String(e) });
+      }
+    })();
+  }, []);
 
   // derived
   const canJoin = useMemo(() => {
@@ -259,8 +280,8 @@ export default function App() {
           const players: string[] = await bingo.playersOf(rid);
           setJoined(players.map((p) => p.toLowerCase()).includes(account.toLowerCase()));
 
-          const r = (await bingo.roundInfo(rid)) as unknown as RoundInfo;
-          if (r.randomness !== 0n) {
+          const r2 = (await bingo.roundInfo(rid)) as unknown as RoundInfo;
+          if (r2.randomness !== 0n) {
             const raw: number[] = await bingo.cardOf(rid, account);
             setCard(Array.from(raw).map(Number));
           } else {
@@ -296,7 +317,6 @@ export default function App() {
     if (!events) return;
 
     const onAny = async (..._args: any[]) => {
-      // keep it simple: any relevant event triggers a fresh pull
       await pullOnce();
     };
 
@@ -383,6 +403,14 @@ export default function App() {
       <Header />
 
       <TopBar chainId={chainId} account={account} onConnect={connect} />
+
+      {/* Diagnose banner */}
+      {diag.msg && (
+        <div style={{background:"#ffecec", border:"1px solid #ffb3b3", padding:12, borderRadius:10, marginBottom:12}}>
+          <b>Config issue:</b> {diag.msg}<br/>
+          <small>chainId seen: {diag.chainId ?? "?"} • address: {CONTRACT_ADDRESS}</small>
+        </div>
+      )}
 
       {!RPC_URL && (
         <div style={{background:"#fff4e5", border:"1px solid #ffd599", padding:12, borderRadius:10, marginBottom:12}}>
