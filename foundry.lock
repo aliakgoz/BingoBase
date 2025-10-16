@@ -19,5 +19,11 @@
   },
   "lib/foundry-chainlink-toolkit": {
     "rev": "d610ec9ef54c325de7de1a5622c19933b2ae26cf"
+  },
+  "lib\\openzeppelin-contracts": {
+    "tag": {
+      "name": "v5.4.0",
+      "rev": "c64a1edb67b6e3f4a15cca8909c9482ad33a02b0"
+    }
   }
 }
