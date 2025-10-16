@@ -1,0 +1,13 @@
+{
+  "name": "basebingo-worker",
+  "version": "1.0.0",
+  "type": "module",
+  "main": "autoloop.js",
+  "scripts": {
+    "start": "node autoloop.js"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.5",
+    "ethers": "^6.13.2"
+  }
+}

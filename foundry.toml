@@ -8,6 +8,7 @@ auto_detect_remappings = false
 
 # Sadece ihtiyacımız olan iki remapping
 remappings = [
+  "@openzeppelin/=lib/openzeppelin-contracts/",
   "@chainlink/contracts/=lib/chainlink-brownie-contracts/contracts/src/",
   "forge-std/=lib/forge-std/src/"
 ]
