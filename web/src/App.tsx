@@ -1,16 +1,18 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   BrowserProvider,
   Contract,
   JsonRpcProvider,
+  WebSocketProvider,
   formatUnits,
   parseUnits,
 } from "ethers";
 
-// ===== ENV =====
+// ===== ENV (BUILD-TIME) =====
 const CONTRACT_ADDRESS = import.meta.env.VITE_CONTRACT_ADDRESS as string;
 const USDC_ADDRESS     = import.meta.env.VITE_USDC_ADDRESS as string;
 const RPC_URL          = (import.meta.env.VITE_RPC_URL as string) || "";
+const RPC_WSS          = (import.meta.env.VITE_RPC_WSS as string) || ""; // optional for events
 
 const BASE_BLUE   = "#0052FF";
 const MAX_NUMBER  = 90;
@@ -38,15 +40,20 @@ const BINGO_ABI = [
   )`,
   `function cardOf(uint256 roundId, address player) view returns (uint8[${CARD_SIZE}])`,
 
-  // actions (only join is user-triggered in UI)
+  // writes (only join is exposed to users)
   "function joinRound(uint256 roundId) external",
+
+  // admin/bot (UI does not call these, but ABI is needed to subscribe events)
   "function requestRandomness(uint256 roundId) external",
   "function drawNext(uint256 roundId) external",
   "function claimBingo(uint256 roundId) external",
 
-  // events (optional)
+  // events
   "event Joined(uint256 indexed roundId, address indexed player, uint256 paidUSDC)",
   "event Draw(uint256 indexed roundId, uint8 number, uint8 drawIndex)",
+  "event RoundCreated(uint256 indexed roundId, uint64 startTime, uint256 entryFeeUSDC)",
+  "event Payout(uint256 indexed roundId, address indexed winner, uint256 winnerUSDC, uint256 feeUSDC)",
+  "event VRFFulfilled(uint256 indexed roundId, uint256 randomness)"
 ];
 
 const ERC20_ABI = [
@@ -73,23 +80,31 @@ type RoundInfo = {
 };
 
 function useProviders() {
+  // read over HTTPS
   const read = useMemo(
     () => (RPC_URL ? new JsonRpcProvider(RPC_URL) : undefined),
     []
   );
-  const [write, setWrite] = useState<BrowserProvider>();
 
+  // optional read over WSS (events)
+  const readWs = useMemo(
+    () => (RPC_WSS ? new WebSocketProvider(RPC_WSS) : undefined),
+    []
+  );
+
+  // write (wallet)
+  const [write, setWrite] = useState<BrowserProvider>();
   useEffect(() => {
     if ((window as any).ethereum) {
       setWrite(new BrowserProvider((window as any).ethereum));
     }
   }, []);
 
-  return { read, write };
+  return { read, readWs, write };
 }
 
 export default function App() {
-  const { read, write } = useProviders();
+  const { read, readWs, write } = useProviders();
 
   // wallet
   const [account, setAccount] = useState<string>("");
@@ -97,6 +112,7 @@ export default function App() {
 
   // contracts
   const [bingo, setBingo] = useState<Contract>();
+  const [bingoWs, setBingoWs] = useState<Contract>(); // for events
   const [usdc, setUsdc] = useState<Contract>();
 
   // state
@@ -112,6 +128,7 @@ export default function App() {
 
   // helpers
   const nowSec = Math.floor(Date.now() / 1000);
+  const pulling = useRef(false);
 
   const canJoin = useMemo(() => {
     if (!round) return false;
@@ -137,12 +154,18 @@ export default function App() {
     [drawnSet]
   );
 
-  // init contracts (read)
+  // init contracts
   useEffect(() => {
-    if (!read || !CONTRACT_ADDRESS) return;
-    setBingo(new Contract(CONTRACT_ADDRESS, BINGO_ABI, read));
-    if (USDC_ADDRESS) setUsdc(new Contract(USDC_ADDRESS, ERC20_ABI, read));
-  }, [read]);
+    if (read && CONTRACT_ADDRESS) {
+      setBingo(new Contract(CONTRACT_ADDRESS, BINGO_ABI, read));
+    }
+    if (readWs && CONTRACT_ADDRESS) {
+      setBingoWs(new Contract(CONTRACT_ADDRESS, BINGO_ABI, readWs));
+    }
+    if (read && USDC_ADDRESS) {
+      setUsdc(new Contract(USDC_ADDRESS, ERC20_ABI, read));
+    }
+  }, [read, readWs]);
 
   // wallet connect
   const connect = async () => {
@@ -153,25 +176,24 @@ export default function App() {
     setChainId(Number(net.chainId));
   };
 
-  // polling
-  useEffect(() => {
-    let t: number;
-    const pull = async () => {
-      try {
-        if (!bingo) return;
+  // shared pull
+  const pullOnce = async () => {
+    if (!bingo || pulling.current) return;
+    pulling.current = true;
+    try {
+      const rid: bigint = await bingo.currentRoundId();
+      const ridN = Number(rid);
+      setCurrentRoundId(ridN);
 
-        const rid: bigint = await bingo.currentRoundId();
-        const ridN = Number(rid);
-        setCurrentRoundId(ridN);
+      if (ridN > 0) {
+        const r = (await bingo.roundInfo(rid)) as unknown as RoundInfo;
+        setRound(r);
+      } else {
+        setRound(undefined);
+      }
 
-        if (ridN > 0) {
-          const r = (await bingo.roundInfo(rid)) as unknown as RoundInfo;
-          setRound(r);
-        } else {
-          setRound(undefined);
-        }
-
-        if (usdc && account) {
+      if (usdc && account) {
+        try {
           const [sym, dec, bal, allo] = await Promise.all([
             usdc.symbol(),
             usdc.decimals(),
@@ -182,13 +204,15 @@ export default function App() {
           setDecimals(Number(dec));
           setBalance(bal);
           setAllowance(allo);
+        } catch (e) {
+          console.warn("ERC20 reads failed:", e);
         }
+      }
 
-        if (bingo && account && ridN > 0) {
+      if (bingo && account && ridN > 0) {
+        try {
           const players: string[] = await bingo.playersOf(rid);
-          setJoined(
-            players.map((p) => p.toLowerCase()).includes(account.toLowerCase())
-          );
+          setJoined(players.map((p) => p.toLowerCase()).includes(account.toLowerCase()));
 
           const r = (await bingo.roundInfo(rid)) as unknown as RoundInfo;
           if (r.randomness !== 0n) {
@@ -197,20 +221,54 @@ export default function App() {
           } else {
             setCard([]);
           }
-        } else {
-          setJoined(false);
-          setCard([]);
+        } catch (e) {
+          console.warn("Game reads failed:", e);
         }
-      } catch {
-        // ignore transient read errors
+      } else {
+        setJoined(false);
+        setCard([]);
       }
+    } catch (e) {
+      console.error("Polling error:", e);
+    } finally {
+      pulling.current = false;
+    }
+  };
 
-      t = window.setTimeout(pull, 1500);
+  // polling loop
+  useEffect(() => {
+    let t: number;
+    const loop = async () => {
+      await pullOnce();
+      t = window.setTimeout(loop, 1500);
     };
-
-    pull();
+    loop();
     return () => window.clearTimeout(t);
   }, [bingo, usdc, account]);
+
+  // event subscriptions (optional)
+  useEffect(() => {
+    if (!bingoWs) return;
+    const onDraw = async (roundId: any, number: any, drawIndex: any) => {
+      // immediate UI refresh on draw
+      await pullOnce();
+    };
+    const onVRF = async () => await pullOnce();
+    const onCreated = async () => await pullOnce();
+    const onPayout = async () => await pullOnce();
+
+    bingoWs.on("Draw", onDraw);
+    bingoWs.on("VRFFulfilled", onVRF);
+    bingoWs.on("RoundCreated", onCreated);
+    bingoWs.on("Payout", onPayout);
+
+    return () => {
+      bingoWs.off("Draw", onDraw);
+      bingoWs.off("VRFFulfilled", onVRF);
+      bingoWs.off("RoundCreated", onCreated);
+      bingoWs.off("Payout", onPayout);
+    };
+  }, [bingoWs]);
 
   // helpers
   const withSigner = async (c: Contract) => {
@@ -219,7 +277,6 @@ export default function App() {
     return c.connect(signer);
   };
 
-  // write actions (cast to any to satisfy TS)
   const doApprove = async () => {
     if (!usdc) return;
     try {
@@ -230,6 +287,7 @@ export default function App() {
         parseUnits("1000000000000", decimals)
       );
       await tx.wait();
+      await pullOnce();
     } catch (e: any) {
       alert(e?.shortMessage ?? e?.message ?? "Approve failed");
     } finally {
@@ -244,6 +302,7 @@ export default function App() {
       const c = await withSigner(bingo);
       const tx = await (c as any).joinRound(currentRoundId);
       await tx.wait();
+      await pullOnce();
     } catch (e: any) {
       alert(e?.shortMessage ?? e?.message ?? "Join failed");
     } finally {
@@ -271,11 +330,20 @@ export default function App() {
     return `Drawing... (${round.drawCount}/${MAX_NUMBER})`;
   }, [round, nowSec]);
 
+  const explorerBase = (cid?: number) =>
+    cid === 8453 ? "https://basescan.org" : "https://sepolia.basescan.org";
+
   return (
     <div style={styles.wrap}>
       <Header />
 
       <TopBar chainId={chainId} account={account} onConnect={connect} />
+
+      {!RPC_URL && (
+        <div style={{background:"#fff4e5", border:"1px solid #ffd599", padding:12, borderRadius:10, marginBottom:12}}>
+          <b>RPC_URL missing.</b> Set VITE_RPC_URL in Vercel and redeploy.
+        </div>
+      )}
 
       <section style={styles.hero}>
         <div>
@@ -386,14 +454,14 @@ export default function App() {
       <footer style={{ margin: "40px 0", fontSize: 12, opacity: 0.7 }}>
         Contract:{" "}
         <a
-          href={`https://sepolia.basescan.org/address/${CONTRACT_ADDRESS}`}
+          href={`${explorerBase(chainId)}/address/${CONTRACT_ADDRESS}`}
           target="_blank"
         >
           {CONTRACT_ADDRESS}
         </a>{" "}
         · USDC:{" "}
         <a
-          href={`https://sepolia.basescan.org/address/${USDC_ADDRESS}`}
+          href={`${explorerBase(chainId)}/address/${USDC_ADDRESS}`}
           target="_blank"
         >
           {USDC_ADDRESS}
@@ -407,7 +475,7 @@ export default function App() {
 function Header() {
   return (
     <div style={{ padding: "10px 0", fontSize: 12, opacity: 0.8 }}>
-      <span>Network: Base Sepolia</span>
+      <span>Network: Base</span>
     </div>
   );
 }
