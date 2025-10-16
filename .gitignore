@@ -17,3 +17,5 @@ Thumbs.db
 
 # Windows spookiness
 NUL
+.env
+.env.*
