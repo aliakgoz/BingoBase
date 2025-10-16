@@ -1,0 +1,38 @@
+[
+  { "type": "function", "name": "createRound", "stateMutability": "nonpayable",
+    "inputs": [
+      { "name": "startTime", "type": "uint64" },
+      { "name": "joinWindow", "type": "uint64" },
+      { "name": "drawInterval", "type": "uint64" },
+      { "name": "entryFeeUSDC", "type": "uint256" }
+    ],
+    "outputs": [{ "type": "uint256" }]
+  },
+  { "type": "function", "name": "joinRound", "stateMutability": "nonpayable",
+    "inputs": [{ "name": "roundId", "type": "uint256" }], "outputs": [] },
+  { "type": "function", "name": "requestRandomness", "stateMutability": "nonpayable",
+    "inputs": [{ "name": "roundId", "type": "uint256" }], "outputs": [{ "type": "uint256" }] },
+  { "type": "function", "name": "drawNext", "stateMutability": "nonpayable",
+    "inputs": [{ "name": "roundId", "type": "uint256" }], "outputs": [] },
+  { "type": "function", "name": "claimBingo", "stateMutability": "nonpayable",
+    "inputs": [{ "name": "roundId", "type": "uint256" }], "outputs": [] },
+  { "type": "function", "name": "roundInfo", "stateMutability": "view",
+    "inputs": [{ "name": "roundId", "type": "uint256" }],
+    "outputs": [
+      { "name":"startTime", "type":"uint64" },
+      { "name":"joinDeadline", "type":"uint64" },
+      { "name":"drawInterval", "type":"uint64" },
+      { "name":"entryFeeUSDC", "type":"uint256" },
+      { "name":"vrfRequested", "type":"bool" },
+      { "name":"randomness", "type":"uint256" },
+      { "name":"drawnMask", "type":"uint256" },
+      { "name":"drawCount", "type":"uint8" },
+      { "name":"lastDrawTime", "type":"uint64" },
+      { "name":"finalized", "type":"bool" },
+      { "name":"winner", "type":"address" },
+      { "name":"prizePoolUSDC", "type":"uint256" }
+    ]
+  },
+  { "type":"function", "name":"usdc", "stateMutability":"view", "inputs":[], "outputs":[{"type":"address"}] },
+  { "type":"function", "name":"currentRoundId", "stateMutability":"view", "inputs":[], "outputs":[{"type":"uint256"}] }
+]

@@ -6,12 +6,11 @@ const CONTRACT_ADDRESS = import.meta.env.VITE_CONTRACT_ADDRESS as string;
 const USDC_ADDRESS     = import.meta.env.VITE_USDC_ADDRESS as string;
 const RPC_URL          = (import.meta.env.VITE_RPC_URL as string) || "";
 
-const BASE_BLUE = "#0052FF"; // Base mavi tonu
+const BASE_BLUE  = "#0052FF"; // Base mavisi
 const MAX_NUMBER = 90;
-const CARD_SIZE = 24;
+const CARD_SIZE  = 24;
 
 // === Minimal ABIs ===
-// BaseBingo25 (güncel versiyon)
 const BINGO_ABI = [
   // views
   "function usdc() view returns (address)",
@@ -39,12 +38,11 @@ const BINGO_ABI = [
   "function drawNext(uint256 roundId) external",
   "function claimBingo(uint256 roundId) external",
 
-  // events (sadece UI içi log/debug için)
+  // events (opsiyonel)
   "event Joined(uint256 indexed roundId, address indexed player, uint256 paidUSDC)",
   "event Draw(uint256 indexed roundId, uint8 number, uint8 drawIndex)",
 ];
 
-// ERC20 (USDC)
 const ERC20_ABI = [
   "function decimals() view returns (uint8)",
   "function symbol() view returns (string)",
@@ -53,6 +51,7 @@ const ERC20_ABI = [
   "function approve(address,uint256) returns (bool)",
 ];
 
+// === Tipler ===
 type RoundInfo = {
   startTime: bigint;
   joinDeadline: bigint;
@@ -61,25 +60,43 @@ type RoundInfo = {
   vrfRequested: boolean;
   randomness: bigint;
   drawnMask: bigint;
-  drawCount: number;
+  drawCount: number;      // bilinçli olarak number (uint8)
   lastDrawTime: bigint;
   finalized: boolean;
   winner: string;
   prizePoolUSDC: bigint;
 };
 
-function useProviders() {
-  // okuma için RPC (hızlı ve cüzdana gerek yok)
-  const read = useMemo(() => (RPC_URL ? new JsonRpcProvider(RPC_URL) : undefined), []);
-  // yazma için wallet provider (Metamask)
-  const [write, setWrite] = useState<BrowserProvider>();
+// Kontrat metodlarını TS'e öğretelim
+type Bingo = Contract & {
+  currentRoundId: () => Promise<bigint>;
+  playersOf: (rid: bigint) => Promise<string[]>;
+  roundInfo: (rid: bigint) => Promise<any>; // ham array, aşağıda parse ediyoruz
+  cardOf: (rid: bigint, addr: string) => Promise<readonly number[]>;
 
+  joinRound: (rid: bigint) => Promise<any>;
+  requestRandomness: (rid: bigint) => Promise<any>;
+  drawNext: (rid: bigint) => Promise<any>;
+  claimBingo: (rid: bigint) => Promise<any>;
+};
+
+type ERC20 = Contract & {
+  decimals: () => Promise<number | bigint>;
+  symbol: () => Promise<string>;
+  balanceOf: (addr: string) => Promise<bigint>;
+  allowance: (owner: string, spender: string) => Promise<bigint>;
+  approve: (spender: string, amount: bigint) => Promise<any>;
+};
+
+// === Provider hook ===
+function useProviders() {
+  const read = useMemo(() => (RPC_URL ? new JsonRpcProvider(RPC_URL) : undefined), []);
+  const [write, setWrite] = useState<BrowserProvider>();
   useEffect(() => {
     if ((window as any).ethereum) {
       setWrite(new BrowserProvider((window as any).ethereum));
     }
   }, []);
-
   return { read, write };
 }
 
@@ -91,25 +108,27 @@ export default function App() {
   const [chainId, setChainId] = useState<number>();
 
   // sözleşmeler
-  const [bingo, setBingo] = useState<Contract>();
-  const [usdc, setUsdc] = useState<Contract>();
+  const [bingo, setBingo] = useState<Bingo>();
+  const [usdc, setUsdc]   = useState<ERC20>();
 
   // durumlar
   const [currentRoundId, setCurrentRoundId] = useState<number>(0);
-  const [round, setRound] = useState<RoundInfo>();
-  const [symbol, setSymbol] = useState<string>("USDC");
-  const [decimals, setDecimals] = useState<number>(6);
-  const [allowance, setAllowance] = useState<bigint>(0n);
-  const [balance, setBalance] = useState<bigint>(0n);
-  const [joined, setJoined] = useState<boolean>(false);
-  const [card, setCard] = useState<number[]>([]);
-  const [loadingTx, setLoadingTx] = useState<string>("");
+  const [round, setRound]                   = useState<RoundInfo>();
+  const [symbol, setSymbol]                 = useState<string>("USDC");
+  const [decimals, setDecimals]             = useState<number>(6);
+  const [allowance, setAllowance]           = useState<bigint>(0n);
+  const [balance, setBalance]               = useState<bigint>(0n);
+  const [joined, setJoined]                 = useState<boolean>(false);
+  const [card, setCard]                     = useState<number[]>([]);
+  const [loadingTx, setLoadingTx]           = useState<string>("");
 
   // --- helpers ---
   const nowSec = Math.floor(Date.now() / 1000);
   const canJoin = useMemo(() => {
     if (!round) return false;
-    return Number(round.startTime) <= nowSec && nowSec < Number(round.joinDeadline) && !joined && !round.finalized;
+    return Number(round.startTime) <= nowSec &&
+           nowSec < Number(round.joinDeadline) &&
+           !joined && !round.finalized;
   }, [round, joined, nowSec]);
 
   const joinLeftSec = useMemo(() => {
@@ -136,13 +155,12 @@ export default function App() {
   // ---- init contracts (read) ----
   useEffect(() => {
     if (!read || !CONTRACT_ADDRESS) return;
-    const bingoR = new Contract(CONTRACT_ADDRESS, BINGO_ABI, read);
+    const bingoR = new Contract(CONTRACT_ADDRESS, BINGO_ABI, read) as Bingo;
     setBingo(bingoR);
 
-    // USDC adresi env'den, yoksa kontrattan da okunabilir
     const usdcAddr = USDC_ADDRESS;
     if (usdcAddr) {
-      const usdcR = new Contract(usdcAddr, ERC20_ABI, read);
+      const usdcR = new Contract(usdcAddr, ERC20_ABI, read) as ERC20;
       setUsdc(usdcR);
     }
   }, [read]);
@@ -163,61 +181,83 @@ export default function App() {
       if (!bingo) return;
 
       const rid: bigint = await bingo.currentRoundId();
-      setCurrentRoundId(Number(rid));
+      const ridNum = Number(rid);
+      setCurrentRoundId(ridNum);
 
-      if (Number(rid) > 0) {
-        const r = (await bingo.roundInfo(rid)) as unknown as RoundInfo;
-        setRound(r);
+      if (ridNum > 0) {
+        // roundInfo dönüşünü parse et (tip güvenli)
+        const raw = await bingo.roundInfo(rid);
+        const parsed: RoundInfo = {
+          startTime:     BigInt(raw[0]),
+          joinDeadline:  BigInt(raw[1]),
+          drawInterval:  BigInt(raw[2]),
+          entryFeeUSDC:  BigInt(raw[3]),
+          vrfRequested:  Boolean(raw[4]),
+          randomness:    BigInt(raw[5]),
+          drawnMask:     BigInt(raw[6]),
+          drawCount:     Number(raw[7]),    // uint8
+          lastDrawTime:  BigInt(raw[8]),
+          finalized:     Boolean(raw[9]),
+          winner:        String(raw[10]),
+          prizePoolUSDC: BigInt(raw[11]),
+        };
+        setRound(parsed);
       }
 
       if (usdc && account) {
         try {
-          const [sym, dec, bal, allo] = await Promise.all([
+          const [sym, decRaw, bal, allo] = await Promise.all([
             usdc.symbol(),
             usdc.decimals(),
             usdc.balanceOf(account),
             usdc.allowance(account, CONTRACT_ADDRESS),
           ]);
           setSymbol(sym);
-          setDecimals(Number(dec));
+          setDecimals(Number(decRaw as any));
           setBalance(bal);
           setAllowance(allo);
         } catch {}
       }
 
-      if (bingo && account && Number(rid) > 0) {
+      if (bingo && account && ridNum > 0) {
         const players: string[] = await bingo.playersOf(rid);
         setJoined(players.map(p => p.toLowerCase()).includes(account.toLowerCase()));
 
         // randomness geldiyse kartı çek
-        const r = (await bingo.roundInfo(rid)) as unknown as RoundInfo;
-        if (r.randomness !== 0n) {
-          const raw = await bingo.cardOf(rid, account);
-          setCard(Array.from(raw).map(Number));
+        const rRaw = await bingo.roundInfo(rid);
+        const randomness = BigInt(rRaw[5]);
+        if (randomness !== 0n) {
+          const rawCard = await bingo.cardOf(rid, account);
+          setCard(Array.from(rawCard).map(Number));
         } else {
           setCard([]);
         }
       }
+
       t = window.setTimeout(pull, 5000);
     };
     pull();
     return () => window.clearTimeout(t);
   }, [bingo, usdc, account]);
 
-  // ---- actions ----
-  const withSigner = async (c: Contract) => {
+  // ---- helpers for write ----
+  const bingoWithSigner = async (): Promise<Bingo> => {
     if (!write) throw new Error("Wallet yok");
     const signer = await write.getSigner();
-    return c.connect(signer);
-    };
+    return new Contract(CONTRACT_ADDRESS, BINGO_ABI, signer) as Bingo;
+  };
+  const usdcWithSigner = async (): Promise<ERC20> => {
+    if (!write) throw new Error("Wallet yok");
+    const signer = await write.getSigner();
+    return new Contract(USDC_ADDRESS, ERC20_ABI, signer) as ERC20;
+  };
 
+  // ---- actions ----
   const doApprove = async () => {
-    if (!usdc) return;
     try {
       setLoadingTx("Approve...");
-      const c = await withSigner(usdc);
-      // geniş bir allowance veriyoruz (1e12 USDC)
-      const tx = await c.approve(CONTRACT_ADDRESS, parseUnits("1000000000000", decimals));
+      const c = await usdcWithSigner();
+      const tx = await c.approve(CONTRACT_ADDRESS, parseUnits("1000000000000", decimals)); // 1e12 USDC allowance
       await tx.wait();
     } catch (e:any) {
       alert(e?.message ?? "Approve hata");
@@ -227,14 +267,13 @@ export default function App() {
   };
 
   const doJoin = async () => {
-    if (!bingo || !round || currentRoundId === 0) return;
+    if (!round || currentRoundId === 0) return;
     try {
       setLoadingTx("Join...");
-      const c = await withSigner(bingo);
-      const tx = await c.joinRound(currentRoundId);
+      const c = await bingoWithSigner();
+      const tx = await c.joinRound(BigInt(currentRoundId));
       await tx.wait();
     } catch (e:any) {
-      // revert mesajını göstermek için
       alert(e?.shortMessage ?? e?.message ?? "Join failed");
     } finally {
       setLoadingTx("");
@@ -242,11 +281,11 @@ export default function App() {
   };
 
   const doRequestRandomness = async () => {
-    if (!bingo || currentRoundId === 0) return;
+    if (currentRoundId === 0) return;
     try {
       setLoadingTx("Request VRF...");
-      const c = await withSigner(bingo);
-      const tx = await c.requestRandomness(currentRoundId);
+      const c = await bingoWithSigner();
+      const tx = await c.requestRandomness(BigInt(currentRoundId));
       await tx.wait();
     } catch (e:any) {
       alert(e?.shortMessage ?? e?.message ?? "VRF request failed");
@@ -256,11 +295,11 @@ export default function App() {
   };
 
   const doDrawNext = async () => {
-    if (!bingo || currentRoundId === 0) return;
+    if (currentRoundId === 0) return;
     try {
       setLoadingTx("Draw...");
-      const c = await withSigner(bingo);
-      const tx = await c.drawNext(currentRoundId);
+      const c = await bingoWithSigner();
+      const tx = await c.drawNext(BigInt(currentRoundId));
       await tx.wait();
     } catch (e:any) {
       alert(e?.shortMessage ?? e?.message ?? "Draw failed");
@@ -270,11 +309,11 @@ export default function App() {
   };
 
   const doClaim = async () => {
-    if (!bingo || currentRoundId === 0) return;
+    if (currentRoundId === 0) return;
     try {
       setLoadingTx("Claim...");
-      const c = await withSigner(bingo);
-      const tx = await c.claimBingo(currentRoundId);
+      const c = await bingoWithSigner();
+      const tx = await c.claimBingo(BigInt(currentRoundId));
       await tx.wait();
     } catch (e:any) {
       alert(e?.shortMessage ?? e?.message ?? "Claim failed");
@@ -319,7 +358,7 @@ export default function App() {
             <Row label="Join Closes In">
               {round ? (joinLeftSec > 0 ? `${joinLeftSec}s` : "Closed") : "-"}
             </Row>
-            <Row label="Draw Count">{round?.drawCount ?? 0} / {MAX_NUMBER}</Row>
+            <Row label="Draw Count">{(round?.drawCount ?? 0)} / {MAX_NUMBER}</Row>
             <Row label="Status">
               {round?.finalized ? "Finalized" : round?.randomness === 0n ? "Waiting VRF" : "Live"}
             </Row>
@@ -369,7 +408,7 @@ export default function App() {
             </div>
 
             <div style={{marginTop:8, fontSize:12, opacity:.7}}>
-              Cüzdan bakiyen: {Number(formatUnits(balance, decimals)).toFixed(2)} {symbol} •
+              Cüzdan bakiyen: {Number(formatUnits(balance, decimals)).toFixed(2)} {symbol} •{" "}
               Allowance: {Number(formatUnits(allowance, decimals)).toFixed(2)} {symbol}
             </div>
           </Card>
