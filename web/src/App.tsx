@@ -397,7 +397,7 @@ export default function App() {
       const c = await withSigner(usdc);
       const tx = await (c as any).approve(
         CONTRACT_ADDRESS,
-        parseUnits("1000000000000", decimals)
+        parseUnits("10", decimals)
       );
       await tx.wait();
       await pullOnce();
