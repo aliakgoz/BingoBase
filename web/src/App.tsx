@@ -484,6 +484,125 @@ export default function App() {
 
       <Header />
 
+      {/* ===== PROMO BANNER ===== */}
+      <section className="bb-banner" role="region" aria-label="BingoBase promo" style={{margin:"18px 0"}}>
+        <style>{`
+          .bb-banner{
+            --bg1:#0a0f17;--bg2:#0c1220;--c1:#e7eef7;--c2:#8ea0b3;--acc:#1b5eff;--chip:#0e1620;--glow:#4da3ff;
+            position:relative;overflow:hidden;border-radius:18px;border:1px solid #1e2a38;padding:28px;
+            background: radial-gradient(1200px 600px at 80% -10%, rgba(27,94,255,.18), transparent 60%),
+                        radial-gradient(900px 500px at 10% 120%, rgba(0,200,83,.14), transparent 60%),
+                        linear-gradient(180deg,var(--bg1),var(--bg2));
+            box-shadow: 0 12px 40px rgba(0,0,0,.35);
+            isolation:isolate;
+          }
+          .bb-banner__inner{max-width:1100px;margin:0 auto;display:grid;gap:18px;grid-template-columns:120px 1fr;align-items:center}
+          .bb-banner__logo-wrap{display:flex;align-items:center;justify-content:center}
+          .bb-banner__logo{
+            width:120px;height:auto;filter:drop-shadow(0 10px 30px rgba(0,0,0,.45));
+            animation: bb-pop .6s ease-out both, bb-breathe 4.5s ease-in-out infinite;
+          }
+          @keyframes bb-pop{from{transform:scale(.8);opacity:0} to{transform:scale(1);opacity:1}}
+          @keyframes bb-breathe{0%,100%{transform:translateY(0)}50%{transform:translateY(-4px)}}
+
+          .bb-banner__body{display:grid;gap:14px}
+          .bb-badge{
+            display:inline-flex;gap:8px;align-items:center;background:var(--chip);border:1px solid #1e2a38;
+            padding:6px 10px;border-radius:999px;color:var(--c1);font:600 12px/1.1 system-ui,Segoe UI,Inter,Arial;
+            text-transform:uppercase;letter-spacing:.08em;
+            box-shadow: inset 0 0 0 1px rgba(255,255,255,.02);
+          }
+          .bb-badge .dot{width:6px;height:6px;border-radius:50%;background:var(--acc);box-shadow:0 0 10px var(--glow)}
+          .bb-title{margin:0;color:var(--c1);font:800 28px/1.15 Inter,system-ui,Segoe UI,Arial;letter-spacing:.2px}
+          .bb-sub{margin:0;color:var(--c2);font:500 14px/1.5 Inter,system-ui}
+          .bb-points{display:flex;flex-wrap:wrap;gap:10px}
+          .bb-chip{
+            color:var(--c1);background:rgba(255,255,255,.04);border:1px solid #223146;border-radius:10px;padding:8px 10px;
+            font:700 13px/1.1 Inter,system-ui
+          }
+          .bb-cta{display:flex;flex-wrap:wrap;gap:12px;align-items:center}
+          .bb-btn{
+            appearance:none;border:none;border-radius:12px;padding:12px 18px;background:var(--acc);color:white;
+            font:800 14px/1 Inter,system-ui;cursor:pointer;transition:transform .12s ease, box-shadow .12s ease, opacity .2s ease;
+            box-shadow:0 10px 30px rgba(27,94,255,.35)
+          }
+          .bb-btn:hover{transform:translateY(-1px);box-shadow:0 16px 36px rgba(27,94,255,.45)}
+          .bb-link{color:#9ecbff;text-decoration:none;font:700 13px/1 Inter,system-ui}
+          .bb-counters{display:flex;gap:14px;flex-wrap:wrap}
+          .bb-kpi{
+            min-width:140px;background:rgba(255,255,255,.03);border:1px solid #223146;border-radius:14px;padding:12px 14px;
+            display:grid;gap:6px
+          }
+          .bb-kpi .v{color:var(--c1);font:800 18px/1 Inter}
+          .bb-kpi .l{color:var(--c2);font:600 12px/1.1 Inter;text-transform:uppercase;letter-spacing:.06em}
+
+          .bb-lines::before,.bb-lines::after{
+            content:"";position:absolute;inset:-20%;background:
+              repeating-linear-gradient(115deg, rgba(150,190,255,.05) 0 6px, transparent 6px 18px);
+            transform:skewY(-6deg);animation:bb-scan 18s linear infinite;pointer-events:none;mix-blend:overlay;mask-image:radial-gradient(55% 60% at 50% 40%, black 55%, transparent 70%);
+          }
+          .bb-lines::after{animation-duration:26s;opacity:.5}
+          @keyframes bb-scan{to{transform:skewY(-6deg) translateY(-10%)}}
+
+          @media (max-width:900px){
+            .bb-banner__inner{grid-template-columns:90px 1fr}
+            .bb-banner{padding:22px}
+            .bb-title{font-size:24px}
+            .bb-sub{font-size:13px}
+          }
+          @media (max-width:620px){
+            .bb-banner__inner{grid-template-columns:1fr; text-align:center}
+            .bb-banner__logo{width:92px;margin:0 auto}
+            .bb-cta{justify-content:center}
+            .bb-counters{justify-content:center}
+          }
+        `}</style>
+
+        <div className="bb-lines" aria-hidden="true"></div>
+
+        <div className="bb-banner__inner">
+          <div className="bb-banner__logo-wrap">
+            <img className="bb-banner__logo" src="/BingoBase4.png" alt="BingoBase logo" />
+          </div>
+
+          <div className="bb-banner__body">
+            <span className="bb-badge"><span className="dot" aria-hidden="true"></span> Built for Base Batches 002 — Builder Track</span>
+
+            <h2 className="bb-title">BingoBase — Fair, Transparent, On-chain Bingo</h2>
+
+            <p className="bb-sub">
+              An on-chain, provably random Bingo powered by Chainlink VRF v2.5. <br />
+              <strong>Each game means at least 100 transactions on Base.</strong>
+            </p>
+
+            <div className="bb-points">
+              <span className="bb-chip">💠 Provable VRF randomness</span>
+              <span className="bb-chip">💵 Entry: 1 USDC</span>
+              <span className="bb-chip">🏆 Winner takes the entire pool</span>
+              <span className="bb-chip">♻️ Keeps drawing until someone wins</span>
+            </div>
+
+            <div className="bb-cta">
+              <a className="bb-btn" href="https://bingobase.io" target="_blank" rel="noopener">Play Now</a>
+              <a className="bb-link" href="https://basescan.org" target="_blank" rel="noopener">See it on Base →</a>
+            </div>
+
+            <div className="bb-counters" aria-label="Banner stats">
+              <div className="bb-kpi">
+                <div className="v">100+ tx</div><div className="l">per game on Base</div>
+              </div>
+              <div className="bb-kpi">
+                <div className="v">VRF</div><div className="l">provable randomness</div>
+              </div>
+              <div className="bb-kpi">
+                <div className="v">1 USDC</div><div className="l">entry fee</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+      {/* ===== /PROMO BANNER ===== */}
+
       <TopBar chainId={chainId} account={account} onConnect={connect} />
 
       {diag.msg && (
@@ -740,13 +859,11 @@ function ChatPanel({ account }:{ account?: string }) {
   const retryRef = useRef<number>(0);
   const lastSendRef = useRef<number>(0);
 
-  // persist + autoscroll
   useEffect(() => {
     localStorage.setItem("bb_chat_v2", JSON.stringify(msgs.slice(-300)));
     if (listRef.current) listRef.current.scrollTop = listRef.current.scrollHeight;
   }, [msgs]);
 
-  // connect (global room)
   useEffect(() => {
     if (!CHAT_WSS) return;
     let stop = false;
@@ -782,7 +899,6 @@ function ChatPanel({ account }:{ account?: string }) {
         ws.onclose = () => {
           setStatus("disconnected");
           wsRef.current = null;
-          // simple backoff reconnect
           const delay = Math.min(15000, 1000 * (2 ** retryRef.current));
           retryRef.current += 1;
           setTimeout(connectWs, delay);
@@ -801,17 +917,16 @@ function ChatPanel({ account }:{ account?: string }) {
     return () => { stop = true; try { wsRef.current?.close(); } catch {} };
   }, [account]);
 
-  // send helpers (rate-limit + trim)
   const send = () => {
     const trimmed = text.replace(/\s+/g, " ").trim();
     if (!trimmed) return;
     const now = Date.now();
-    if (now - lastSendRef.current < 500) return; // very light spam control
+    if (now - lastSendRef.current < 500) return;
     lastSendRef.current = now;
 
     const safe = trimmed.slice(0, 280);
     const m: Msg = { id: crypto.randomUUID(), from: user, text: safe, ts: now };
-    setMsgs((x) => [...x, m]); // optimistic (server may not echo to sender)
+    setMsgs((x) => [...x, m]);
     setText("");
     if (wsRef.current && wsRef.current.readyState === 1) {
       wsRef.current.send(JSON.stringify({ type: "msg", from: user, text: safe, ts: now }));
