@@ -18,6 +18,12 @@ const BASE_BLUE   = "#0052FF";
 const MAX_NUMBER  = 90;
 const CARD_SIZE   = 24;
 
+// Fixed grid metrics (keeps layout stable)
+const CARD_CELL_H = 44;     // must match GridCard cell height
+const CARD_GAP    = 8;
+const CARD_ROWS   = 4;      // 24 numbers / 6 cols
+const CARD_MIN_H  = CARD_ROWS * CARD_CELL_H + (CARD_ROWS - 1) * CARD_GAP; // ~200px
+
 // ===== Minimal ABIs =====
 const BINGO_ABI = [
   // views
@@ -183,8 +189,9 @@ export default function App() {
     return set;
   }, [round]);
 
-  const lastDrawnList = useMemo(
-    () => Array.from(drawnSet).sort((a, b) => a - b).slice(-10),
+  // full drawn list (ascending) — shows ALL drawn numbers, not just last 10
+  const allDrawnList = useMemo(
+    () => Array.from(drawnSet).sort((a, b) => a - b),
     [drawnSet]
   );
 
@@ -249,7 +256,15 @@ export default function App() {
     try {
       const rid: bigint = await bingo.currentRoundId();
       const ridN = Number(rid);
-      setCurrentRoundId(ridN);
+
+      // On round change, clear per-round UI first to avoid flicker / stale card
+      setCurrentRoundId((prev) => {
+        if (prev !== ridN) {
+          setJoined(false);
+          setCard([]);
+        }
+        return ridN;
+      });
 
       if (ridN > 0) {
         const r = (await bingo.roundInfo(rid)) as unknown as RoundInfo;
@@ -278,10 +293,12 @@ export default function App() {
       if (bingo && account && ridN > 0) {
         try {
           const players: string[] = await bingo.playersOf(rid);
-          setJoined(players.map((p) => p.toLowerCase()).includes(account.toLowerCase()));
+          const isJoined = players.map((p) => p.toLowerCase()).includes(account.toLowerCase());
+          setJoined(isJoined);
 
+          // Only fetch card if joined AND VRF is ready
           const r2 = (await bingo.roundInfo(rid)) as unknown as RoundInfo;
-          if (r2.randomness !== 0n) {
+          if (isJoined && r2.randomness !== 0n) {
             const raw: number[] = await bingo.cardOf(rid, account);
             setCard(Array.from(raw).map(Number));
           } else {
@@ -289,6 +306,8 @@ export default function App() {
           }
         } catch (e) {
           console.warn("Game state read error:", e);
+          setJoined(false);
+          setCard([]);
         }
       } else {
         setJoined(false);
@@ -400,6 +419,16 @@ export default function App() {
 
   return (
     <div style={styles.wrap}>
+      {/* Global styles for responsiveness & hover */}
+      <style>{`
+        @media (max-width: 960px) {
+          .cols { grid-template-columns: 1fr; }
+        }
+        .hover-grow { transition: transform .12s ease; }
+        .hover-grow:hover { transform: scale(1.06); }
+        .no-select { user-select: none; }
+      `}</style>
+
       <Header />
 
       <TopBar chainId={chainId} account={account} onConnect={connect} />
@@ -436,7 +465,7 @@ export default function App() {
         <img src="/BingoBase4.png" alt="logo" style={{ height: 56 }} />
       </section>
 
-      <section style={styles.columns}>
+      <section className="cols" style={styles.columns}>
         {/* Left */}
         <div style={styles.leftCol}>
           <Card title="Main Hall">
@@ -501,12 +530,13 @@ export default function App() {
             </div>
           </Card>
 
-          <Card title="Recent Draws">
-            {lastDrawnList.length === 0 ? (
+          {/* ALL draws (so far) */}
+          <Card title="All Draws (so far)">
+            {allDrawnList.length === 0 ? (
               <div style={{ opacity: 0.6 }}>No draws yet.</div>
             ) : (
               <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
-                {lastDrawnList.map((n) => (
+                {allDrawnList.map((n) => (
                   <Ball key={n} n={n} active />
                 ))}
               </div>
@@ -520,14 +550,22 @@ export default function App() {
             <Grid90 drawn={drawnSet} />
           </Card>
 
+          {/* Card area: always render container with fixed minHeight to keep layout stable.
+              Show grid only if *joined this round* AND card is available (post-VRF). */}
           <Card title="Your Card (24)">
-            {card.length === 0 ? (
-              <div style={{ opacity: 0.7 }}>
-                Your card appears after VRF (join first; card is derived deterministically from your address).
-              </div>
-            ) : (
-              <GridCard card={card} drawn={drawnSet} />
-            )}
+            <div style={{ minHeight: CARD_MIN_H }}>
+              {joined && card.length === 24 ? (
+                <GridCard card={card} drawn={drawnSet} />
+              ) : (
+                <div style={{ opacity: 0.7, padding: 6 }}>
+                  {account
+                    ? (joined
+                        ? "Your card will appear after VRF."
+                        : "Join the current round to receive a card.")
+                    : "Connect your wallet to join a round."}
+                </div>
+              )}
+            </div>
           </Card>
         </div>
       </section>
@@ -584,6 +622,7 @@ function TopBar({
         <span style={{ fontSize: 12, opacity: 0.7 }}>ChainId: {chainId ?? "-"}</span>
         {account ? (
           <code
+            className="no-select"
             style={{
               fontSize: 12,
               background: "#f4f6fa",
@@ -643,6 +682,7 @@ function Grid90({ drawn }: { drawn: Set<number> }) {
       {Array.from({ length: MAX_NUMBER }, (_, i) => i + 1).map((n) => (
         <div
           key={n}
+          className="hover-grow no-select"
           style={{
             border: "1px solid #e6eaf2",
             borderRadius: 8,
@@ -654,6 +694,7 @@ function Grid90({ drawn }: { drawn: Set<number> }) {
             color: drawn.has(n) ? "#fff" : "#111",
             fontWeight: 600,
           }}
+          title={String(n)}
         >
           {n}
         </div>
@@ -664,14 +705,15 @@ function Grid90({ drawn }: { drawn: Set<number> }) {
 
 function GridCard({ card, drawn }: { card: number[]; drawn: Set<number> }) {
   return (
-    <div style={{ display: "grid", gridTemplateColumns: "repeat(6, 1fr)", gap: 8 }}>
+    <div style={{ display: "grid", gridTemplateColumns: "repeat(6, 1fr)", gap: CARD_GAP }}>
       {card.map((n, idx) => (
         <div
           key={idx}
+          className="hover-grow no-select"
           style={{
             border: "1px solid #e6eaf2",
             borderRadius: 10,
-            height: 44,
+            height: CARD_CELL_H,
             display: "flex",
             alignItems: "center",
             justifyContent: "center",
@@ -680,6 +722,7 @@ function GridCard({ card, drawn }: { card: number[]; drawn: Set<number> }) {
             fontWeight: 700,
             fontSize: 16,
           }}
+          title={String(n)}
         >
           {n}
         </div>
@@ -691,6 +734,7 @@ function GridCard({ card, drawn }: { card: number[]; drawn: Set<number> }) {
 function Ball({ n, active = false }: { n: number; active?: boolean }) {
   return (
     <div
+      className="hover-grow no-select"
       style={{
         width: 34,
         height: 34,
@@ -703,6 +747,7 @@ function Ball({ n, active = false }: { n: number; active?: boolean }) {
         border: "1px solid #e6eaf2",
         fontWeight: 700,
       }}
+      title={String(n)}
     >
       {n}
     </div>
