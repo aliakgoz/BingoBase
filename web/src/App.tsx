@@ -14,7 +14,21 @@ const USDC_ADDRESS     = import.meta.env.VITE_USDC_ADDRESS as string;
 const RPC_URL          = (import.meta.env.VITE_RPC_URL as string) || "";
 const RPC_WSS          = (import.meta.env.VITE_RPC_WSS as string) || "";
 
-const BASE_BLUE   = "#0052FF";
+// ===== THEME =====
+const THEME_BG = "#0b0f14";        // page
+const THEME_TEXT = "#e7eef7";      // primary text
+const THEME_MUTED = "#8ea0b3";     // secondary text
+const CARD_BG = "#121a23";         // card bg
+const CARD_BORDER = "#1e2a38";     // card border
+const CARD_SHADOW = "0 2px 10px rgba(0,0,0,.25)";
+//const INPUT_BG = "#0f141b";
+const CHIP_BG = "#0e1620";
+
+const ACTIVE_GREEN = "#00C853";    // drawn highlight
+const ACTIVE_GREEN_TEXT = "#eafff2";
+const BTN_PRIMARY_BG = "#1b5eff";  // action
+const BTN_PRIMARY_BG_DISABLED = "#2a3866";
+
 const MAX_NUMBER  = 90;
 const CARD_SIZE   = 24;
 
@@ -142,6 +156,7 @@ export default function App() {
   const [balance, setBalance]               = useState<bigint>(0n);
   const [joined, setJoined]                 = useState<boolean>(false);
   const [card, setCard]                     = useState<number[]>([]);
+  const [hasCard, setHasCard]               = useState<boolean>(false); // controls visibility to avoid flicker
   const [loadingTx, setLoadingTx]           = useState<string>("");
 
   // diagnostics
@@ -257,10 +272,11 @@ export default function App() {
       const rid: bigint = await bingo.currentRoundId();
       const ridN = Number(rid);
 
-      // On round change, clear per-round UI first to avoid flicker / stale card
+      // On round change, clear per-round UI first to avoid stale card
       setCurrentRoundId((prev) => {
         if (prev !== ridN) {
           setJoined(false);
+          setHasCard(false);
           setCard([]);
         }
         return ridN;
@@ -300,18 +316,23 @@ export default function App() {
           const r2 = (await bingo.roundInfo(rid)) as unknown as RoundInfo;
           if (isJoined && r2.randomness !== 0n) {
             const raw: number[] = await bingo.cardOf(rid, account);
-            setCard(Array.from(raw).map(Number));
+            const arr = Array.from(raw).map(Number);
+            if (arr.length === 24) {
+              setCard(arr);
+              setHasCard(true); // keep visible (no blinking)
+            }
           } else {
-            setCard([]);
+            // Do NOT wipe out an existing card during polling; just hide if not available
+            setHasCard(false);
           }
         } catch (e) {
           console.warn("Game state read error:", e);
           setJoined(false);
-          setCard([]);
+          setHasCard(false);
         }
       } else {
         setJoined(false);
-        setCard([]);
+        setHasCard(false);
       }
     } catch (e) {
       console.error("Polling error:", e);
@@ -421,12 +442,13 @@ export default function App() {
     <div style={styles.wrap}>
       {/* Global styles for responsiveness & hover */}
       <style>{`
-        @media (max-width: 960px) {
-          .cols { grid-template-columns: 1fr; }
-        }
-        .hover-grow { transition: transform .12s ease; }
-        .hover-grow:hover { transform: scale(1.06); }
+        :root { color-scheme: dark; }
+        html, body, #root { background: ${THEME_BG}; }
+        @media (max-width: 960px) { .cols { grid-template-columns: 1fr; } }
+        .hover-grow { transition: transform .14s ease, box-shadow .14s ease; }
+        .hover-grow:hover { transform: scale(1.24); box-shadow: 0 6px 20px rgba(0,0,0,.35); }
         .no-select { user-select: none; }
+        a{ color:#9ecbff }
       `}</style>
 
       <Header />
@@ -435,34 +457,34 @@ export default function App() {
 
       {/* Diagnose banner */}
       {diag.msg && (
-        <div style={{background:"#ffecec", border:"1px solid #ffb3b3", padding:12, borderRadius:10, marginBottom:12}}>
+        <div style={{background:"#2a1515", border:`1px solid ${CARD_BORDER}`, padding:12, borderRadius:10, marginBottom:12, color:THEME_TEXT}}>
           <b>Config issue:</b> {diag.msg}<br/>
           <small>chainId seen: {diag.chainId ?? "?"} • address: {CONTRACT_ADDRESS}</small>
         </div>
       )}
 
       {!RPC_URL && (
-        <div style={{background:"#fff4e5", border:"1px solid #ffd599", padding:12, borderRadius:10, marginBottom:12}}>
+        <div style={{background:"#211a0c", border:`1px solid ${CARD_BORDER}`, padding:12, borderRadius:10, marginBottom:12}}>
           <b>RPC_URL missing.</b> Set VITE_RPC_URL in Vercel and redeploy.
         </div>
       )}
       {!RPC_WSS && (
-        <div style={{background:"#eef6ff", border:"1px solid #b3d4ff", padding:12, borderRadius:10, marginBottom:12}}>
+        <div style={{background:"#0f1726", border:`1px solid ${CARD_BORDER}`, padding:12, borderRadius:10, marginBottom:12}}>
           <b>VITE_RPC_WSS not set.</b> Live events will rely on HTTP polling only.
         </div>
       )}
 
       <section style={styles.hero}>
         <div>
-          <h1 style={{ margin: 0, fontSize: 36 }}>BingoBase</h1>
-          <p style={{ marginTop: 8, opacity: 0.8 }}>
+          <h1 style={{ margin: 0, fontSize: 36, color: THEME_TEXT }}>BingoBase</h1>
+          <p style={{ marginTop: 8, color: THEME_MUTED }}>
             Provably fair on-chain Bingo on Base • Chainlink VRF v2.5
           </p>
-          <div style={{fontSize:12, opacity:0.7, marginTop:6}}>
-            Read via: <b>{readProviderName}</b> · Latest block: <b>{latestBlock || "-"}</b>
+          <div style={{fontSize:12, color:THEME_MUTED, marginTop:6}}>
+            Read via: <b style={{color:THEME_TEXT}}>{readProviderName}</b> · Latest block: <b style={{color:THEME_TEXT}}>{latestBlock || "-"}</b>
           </div>
         </div>
-        <img src="/BingoBase4.png" alt="logo" style={{ height: 56 }} />
+        <img src="/BingoBase4.png" alt="logo" style={{ height: 56, filter:"drop-shadow(0 2px 8px rgba(0,0,0,.5))" }} />
       </section>
 
       <section className="cols" style={styles.columns}>
@@ -524,16 +546,16 @@ export default function App() {
               </button>
             </div>
 
-            <div style={{ marginTop: 8, fontSize: 12, opacity: 0.7 }}>
-              Wallet balance: {Number(formatUnits(balance, decimals)).toFixed(2)} {symbol} ·{" "}
-              Allowance: {Number(formatUnits(allowance, decimals)).toFixed(2)} {symbol}
+            <div style={{ marginTop: 8, fontSize: 12, color: THEME_MUTED }}>
+              Wallet balance: <span style={{color:THEME_TEXT}}>{Number(formatUnits(balance, decimals)).toFixed(2)} {symbol}</span> ·{" "}
+              Allowance: <span style={{color:THEME_TEXT}}>{Number(formatUnits(allowance, decimals)).toFixed(2)} {symbol}</span>
             </div>
           </Card>
 
           {/* ALL draws (so far) */}
           <Card title="All Draws (so far)">
             {allDrawnList.length === 0 ? (
-              <div style={{ opacity: 0.6 }}>No draws yet.</div>
+              <div style={{ color: THEME_MUTED }}>No draws yet.</div>
             ) : (
               <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
                 {allDrawnList.map((n) => (
@@ -550,27 +572,18 @@ export default function App() {
             <Grid90 drawn={drawnSet} />
           </Card>
 
-          {/* Card area: always render container with fixed minHeight to keep layout stable.
-              Show grid only if *joined this round* AND card is available (post-VRF). */}
-          <Card title="Your Card (24)">
-            <div style={{ minHeight: CARD_MIN_H }}>
-              {joined && card.length === 24 ? (
+          {/* Card area: show ONLY if the user actually has a card; keep visible to avoid blinking */}
+          {hasCard && card.length === 24 && (
+            <Card title="Your Card (24)">
+              <div style={{ minHeight: CARD_MIN_H }}>
                 <GridCard card={card} drawn={drawnSet} />
-              ) : (
-                <div style={{ opacity: 0.7, padding: 6 }}>
-                  {account
-                    ? (joined
-                        ? "Your card will appear after VRF."
-                        : "Join the current round to receive a card.")
-                    : "Connect your wallet to join a round."}
-                </div>
-              )}
-            </div>
-          </Card>
+              </div>
+            </Card>
+          )}
         </div>
       </section>
 
-      <footer style={{ margin: "40px 0", fontSize: 12, opacity: 0.7 }}>
+      <footer style={{ margin: "40px 0", fontSize: 12, color: THEME_MUTED }}>
         Contract:{" "}
         <a
           href={`${explorerBase(chainId)}/address/${CONTRACT_ADDRESS}`}
@@ -593,7 +606,7 @@ export default function App() {
 // ===== UI parts =====
 function Header() {
   return (
-    <div style={{ padding: "10px 0", fontSize: 12, opacity: 0.8 }}>
+    <div style={{ padding: "10px 0", fontSize: 12, color: THEME_MUTED }}>
       <span>Network: Base</span>
     </div>
   );
@@ -617,17 +630,19 @@ function TopBar({
         marginBottom: 12,
       }}
     >
-      <div style={{ fontWeight: 600 }}>Main Hall</div>
+      <div style={{ fontWeight: 700, color: THEME_TEXT }}>Main Hall</div>
       <div style={{ display: "flex", gap: 12, alignItems: "center" }}>
-        <span style={{ fontSize: 12, opacity: 0.7 }}>ChainId: {chainId ?? "-"}</span>
+        <span style={{ fontSize: 12, color: THEME_MUTED }}>ChainId: {chainId ?? "-"}</span>
         {account ? (
           <code
             className="no-select"
             style={{
               fontSize: 12,
-              background: "#f4f6fa",
+              background: CHIP_BG,
               padding: "6px 10px",
               borderRadius: 8,
+              color: THEME_TEXT,
+              border: `1px solid ${CARD_BORDER}`,
             }}
           >
             {account.slice(0, 6)}…{account.slice(-4)}
@@ -653,7 +668,7 @@ function Card({ title, children }: { title: string; children: any }) {
           marginBottom: 12,
         }}
       >
-        <h3 style={{ margin: 0, fontSize: 18 }}>{title}</h3>
+        <h3 style={{ margin: 0, fontSize: 18, color: THEME_TEXT }}>{title}</h3>
       </div>
       {children}
     </div>
@@ -667,11 +682,12 @@ function Row({ label, children }: { label: string; children: any }) {
         display: "flex",
         justifyContent: "space-between",
         padding: "8px 0",
-        borderBottom: "1px solid #eff2f7",
+        borderBottom: `1px solid ${CARD_BORDER}`,
+        color: THEME_TEXT,
       }}
     >
-      <div style={{ opacity: 0.7 }}>{label}</div>
-      <div style={{ fontWeight: 600 }}>{children}</div>
+      <div style={{ color: THEME_MUTED }}>{label}</div>
+      <div style={{ fontWeight: 700 }}>{children}</div>
     </div>
   );
 }
@@ -684,15 +700,15 @@ function Grid90({ drawn }: { drawn: Set<number> }) {
           key={n}
           className="hover-grow no-select"
           style={{
-            border: "1px solid #e6eaf2",
+            border: `1px solid ${CARD_BORDER}`,
             borderRadius: 8,
             height: 32,
             display: "flex",
             alignItems: "center",
             justifyContent: "center",
-            background: drawn.has(n) ? BASE_BLUE : "#fff",
-            color: drawn.has(n) ? "#fff" : "#111",
-            fontWeight: 600,
+            background: drawn.has(n) ? ACTIVE_GREEN : CARD_BG,
+            color: drawn.has(n) ? ACTIVE_GREEN_TEXT : THEME_TEXT,
+            fontWeight: 700,
           }}
           title={String(n)}
         >
@@ -711,15 +727,15 @@ function GridCard({ card, drawn }: { card: number[]; drawn: Set<number> }) {
           key={idx}
           className="hover-grow no-select"
           style={{
-            border: "1px solid #e6eaf2",
+            border: `1px solid ${CARD_BORDER}`,
             borderRadius: 10,
             height: CARD_CELL_H,
             display: "flex",
             alignItems: "center",
             justifyContent: "center",
-            background: drawn.has(n) ? BASE_BLUE : "#fff",
-            color: drawn.has(n) ? "#fff" : "#111",
-            fontWeight: 700,
+            background: drawn.has(n) ? ACTIVE_GREEN : CARD_BG,
+            color: drawn.has(n) ? ACTIVE_GREEN_TEXT : THEME_TEXT,
+            fontWeight: 800,
             fontSize: 16,
           }}
           title={String(n)}
@@ -742,10 +758,10 @@ function Ball({ n, active = false }: { n: number; active?: boolean }) {
         display: "flex",
         alignItems: "center",
         justifyContent: "center",
-        background: active ? BASE_BLUE : "#fff",
-        color: active ? "#fff" : "#111",
-        border: "1px solid #e6eaf2",
-        fontWeight: 700,
+        background: active ? ACTIVE_GREEN : CARD_BG,
+        color: active ? ACTIVE_GREEN_TEXT : THEME_TEXT,
+        border: `1px solid ${CARD_BORDER}`,
+        fontWeight: 800,
       }}
       title={String(n)}
     >
@@ -761,6 +777,8 @@ const styles: Record<string, React.CSSProperties> = {
     margin: "24px auto",
     padding: "0 16px",
     fontFamily: "Inter, system-ui, Arial",
+    background: THEME_BG,
+    color: THEME_TEXT,
   },
   hero: {
     display: "flex",
@@ -773,10 +791,10 @@ const styles: Record<string, React.CSSProperties> = {
   rightCol: {},
   card: {
     padding: 16,
-    border: "1px solid #e6eaf2",
+    border: `1px solid ${CARD_BORDER}`,
     borderRadius: 16,
-    background: "#fff",
-    boxShadow: "0 1px 2px rgba(20,20,20,.03)",
+    background: CARD_BG,
+    boxShadow: CARD_SHADOW,
     marginBottom: 16,
   },
 };
@@ -787,17 +805,17 @@ function btnPrimary(enabled: boolean): React.CSSProperties {
     borderRadius: 10,
     border: "1px solid transparent",
     cursor: enabled ? "pointer" : "not-allowed",
-    background: enabled ? BASE_BLUE : "#d8e0ff",
-    color: "#fff",
-    fontWeight: 700,
+    background: enabled ? BTN_PRIMARY_BG : BTN_PRIMARY_BG_DISABLED,
+    color: THEME_TEXT,
+    fontWeight: 800,
   };
 }
 const btnGhost: React.CSSProperties = {
   padding: "10px 14px",
   borderRadius: 10,
-  border: "1px solid #dde3ef",
+  border: `1px solid ${CARD_BORDER}`,
   cursor: "pointer",
-  background: "#fff",
-  color: "#111",
-  fontWeight: 600,
+  background: CARD_BG,
+  color: THEME_TEXT,
+  fontWeight: 700,
 };
