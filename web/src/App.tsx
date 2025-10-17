@@ -573,7 +573,7 @@ export default function App() {
 
         {/* Right: Chat + Last 5 draws */}
         <div style={styles.chatCol}>
-          <ChatPanel account={account} roundId={currentRoundId} />
+          <ChatPanel account={account} />
           <div style={{ height: 12 }} />
           <Card title="Last 5 Draws">
             {drawFeed.length === 0 ? (
@@ -725,8 +725,8 @@ function Ball({ n, active = false }: { n: number; active?: boolean }) {
   );
 }
 
-// ===== Chat Panel =====
-function ChatPanel({ account, roundId }:{ account?: string; roundId: number }) {
+// ===== Chat Panel (GLOBAL) =====
+function ChatPanel({ account }:{ account?: string }) {
   const last4 = account ? account.slice(-4) : "anon";
   const user = `:${last4}`;
   type Msg = { id: string; from: string; text: string; ts: number };
@@ -748,7 +748,7 @@ function ChatPanel({ account, roundId }:{ account?: string; roundId: number }) {
     try {
       const ws = new WebSocket(CHAT_WSS);
       wsRef.current = ws;
-      ws.onopen = () => { ws.send(JSON.stringify({ type: "join", from: user, roundId })); };
+      ws.onopen = () => { ws.send(JSON.stringify({ type: "join", from: user })); };
       ws.onmessage = (ev) => {
         try {
           const data = JSON.parse(ev.data);
@@ -761,16 +761,16 @@ function ChatPanel({ account, roundId }:{ account?: string; roundId: number }) {
       ws.onclose = () => { wsRef.current = null; };
       return () => { ws.close(); };
     } catch {}
-  }, [roundId, account]);
+  }, [account]);
 
   const send = () => {
     const trimmed = text.trim();
     if (!trimmed) return;
     const m: Msg = { id: crypto.randomUUID(), from: user, text: trimmed, ts: Date.now() };
-    setMsgs((x) => [...x, m]);
+    setMsgs((x) => [...x, m]); // server doesn't echo back to sender
     setText("");
     if (wsRef.current && wsRef.current.readyState === 1) {
-      wsRef.current.send(JSON.stringify({ type: "msg", from: user, text: trimmed, ts: m.ts, roundId }));
+      wsRef.current.send(JSON.stringify({ type: "msg", from: user, text: trimmed, ts: m.ts }));
     }
   };
   const onKey = (e: React.KeyboardEvent<HTMLInputElement>) => { if (e.key === "Enter") send(); };
