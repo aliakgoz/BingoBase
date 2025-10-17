@@ -455,6 +455,25 @@ export default function App() {
     return `Drawing... (${round.drawCount}/${MAX_NUMBER})`;
   }, [round, nowSec]);
 
+  // ---- Banner CTA logic (Connect/Approve/Join) ----
+  const bannerCtaLabel = (() => {
+    if (loadingTx) return loadingTx;
+    if (!account) return "Connect Wallet";
+    if (!round) return "Loading…";
+    if (!canJoin) return "Join Closed";
+    if (allowance < (round.entryFeeUSDC ?? 0n)) return `Approve ${symbol}`;
+    return `Join • ${entryStr}`;
+  })();
+
+  const onBannerClick = async () => {
+    if (loadingTx) return;
+    if (!account) { await connect(); return; }
+    if (!round || !canJoin) { alert("Join window is closed or not available yet."); return; }
+    if (allowance < (round.entryFeeUSDC ?? 0n)) { await doApprove(); return; }
+    await doJoin();
+  };
+  // -----------------------------------------------
+
   // Set tab title + favicon
   useEffect(() => {
     try {
@@ -583,7 +602,10 @@ export default function App() {
             </div>
 
             <div className="bb-cta">
-              <a className="bb-btn" href="https://bingobase.io" target="_blank" rel="noopener">Play Now</a>
+              {/* REPLACED: Play Now link -> smart Join button */}
+              <button className="bb-btn" onClick={onBannerClick} disabled={loadingTx !== ""}>
+                {bannerCtaLabel}
+              </button>
               <a className="bb-link" href="https://basescan.org" target="_blank" rel="noopener">See it on Base →</a>
             </div>
 
