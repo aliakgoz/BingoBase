@@ -15,18 +15,22 @@ const RPC_URL          = (import.meta.env.VITE_RPC_URL as string) || "";
 const RPC_WSS          = (import.meta.env.VITE_RPC_WSS as string) || "";
 const CHAT_WSS         = (import.meta.env.VITE_CHAT_WSS as string) || "";
 
+// ===== CONSTS =====
+const EXPLORER = "https://basescan.org"; // mainnet Base explorer
+const LAST_LOG_LOOKBACK = 20000;          // son Draw'ı ararken blok aralığı
+
 // ===== THEME =====
-const THEME_BG = "#0b0f14";        // page
-const THEME_TEXT = "#e7eef7";      // primary text
-const THEME_MUTED = "#8ea0b3";     // secondary text
-const CARD_BG = "#121a23";         // card bg
-const CARD_BORDER = "#1e2a38";     // card border
+const THEME_BG = "#0b0f14";
+const THEME_TEXT = "#e7eef7";
+const THEME_MUTED = "#8ea0b3";
+const CARD_BG = "#121a23";
+const CARD_BORDER = "#1e2a38";
 const CARD_SHADOW = "0 2px 10px rgba(0,0,0,.25)";
 const CHIP_BG = "#0e1620";
 
-const ACTIVE_GREEN = "#00C853";          // most-recent draw
+const ACTIVE_GREEN = "#00C853";
 const ACTIVE_GREEN_TEXT = "#eafff2";
-const DRAWN_BLUE = "#1B4BFF";            // older drawn numbers
+const DRAWN_BLUE = "#1B4BFF";
 const DRAWN_BLUE_TEXT = "#eaf0ff";
 const BTN_PRIMARY_BG = "#1b5eff";
 const BTN_PRIMARY_BG_DISABLED = "#2a3866";
@@ -34,15 +38,14 @@ const BTN_PRIMARY_BG_DISABLED = "#2a3866";
 const MAX_NUMBER  = 90;
 const CARD_SIZE   = 24;
 
-// Fixed grid metrics (keeps layout stable)
-const CARD_CELL_H = 44;     // must match GridCard cell height
+// Fixed grid metrics
+const CARD_CELL_H = 44;
 const CARD_GAP    = 8;
-const CARD_ROWS   = 4;      // 24 numbers / 6 cols
-const CARD_MIN_H  = CARD_ROWS * CARD_CELL_H + (CARD_ROWS - 1) * CARD_GAP; // ~200px
+const CARD_ROWS   = 4;
+const CARD_MIN_H  = CARD_ROWS * CARD_CELL_H + (CARD_ROWS - 1) * CARD_GAP;
 
 // ===== Minimal ABIs =====
 const BINGO_ABI = [
-  // views
   "function usdc() view returns (address)",
   "function currentRoundId() view returns (uint256)",
   "function playersOf(uint256) view returns (address[])",
@@ -61,16 +64,10 @@ const BINGO_ABI = [
     uint256 prizePoolUSDC
   )`,
   `function cardOf(uint256 roundId, address player) view returns (uint8[${CARD_SIZE}])`,
-
-  // writes visible to user
   "function joinRound(uint256 roundId) external",
-
-  // admin/bot (not called from UI, but ABI needed for events)
   "function requestRandomness(uint256 roundId) external",
   "function drawNext(uint256 roundId) external",
   "function claimBingo(uint256 roundId) external",
-
-  // events
   "event Joined(uint256 indexed roundId, address indexed player, uint256 paidUSDC)",
   "event Draw(uint256 indexed roundId, uint8 number, uint8 drawIndex)",
   "event RoundCreated(uint256 indexed roundId, uint64 startTime, uint256 entryFeeUSDC)",
@@ -102,7 +99,6 @@ type RoundInfo = {
 };
 
 function useProviders() {
-  // Prefer WSS for reads (live) and events; fallback to HTTPS for reads if WSS missing
   const readWs = useMemo(
     () => (RPC_WSS ? new WebSocketProvider(RPC_WSS) : undefined),
     []
@@ -112,7 +108,6 @@ function useProviders() {
     []
   );
 
-  // Wallet provider (injected)
   const [write, setWrite] = useState<BrowserProvider>();
   useEffect(() => {
     if ((window as any).ethereum) {
@@ -136,17 +131,17 @@ export default function App() {
 
   // providers chosen
   const [readProviderName, setReadProviderName] = useState<string>("(unused)");
-  const read = readWs ?? readHttp; // prefer WSS
+  const read = readWs ?? readHttp;
   useEffect(() => {
     setReadProviderName(readWs ? "WSS" : (readHttp ? "HTTP" : "(none)"));
     if (!readWs && !readHttp) {
-      console.error("No RPC providers are configured. Set VITE_RPC_WSS and/or VITE_RPC_URL.");
+      console.error("No RPC providers configured.");
     }
   }, [readWs, readHttp]);
 
   // contracts
   const [bingo, setBingo]   = useState<Contract>();
-  const [events, setEvents] = useState<Contract>(); // events bound to WSS if available
+  const [events, setEvents] = useState<Contract>();
   const [usdc, setUsdc]     = useState<Contract>();
 
   // state
@@ -158,15 +153,18 @@ export default function App() {
   const [balance, setBalance]               = useState<bigint>(0n);
   const [joined, setJoined]                 = useState<boolean>(false);
   const [card, setCard]                     = useState<number[]>([]);
-  const [hasCard, setHasCard]               = useState<boolean>(false); // lock-on to avoid flicker
+  const [hasCard, setHasCard]               = useState<boolean>(false);
   const [cardRoundId, setCardRoundId]       = useState<number>(0);
   const [loadingTx, setLoadingTx]           = useState<string>("");
 
   // drawn highlighting (only last = green)
   const [lastDrawn, setLastDrawn]           = useState<number | undefined>(undefined);
 
-  // chat sender binding (parent -> chat)
-const chatSendRef = useRef<((text: string) => void) | null>(null);
+  // chat sender binding
+  const chatSendRef = useRef<((text: string) => void) | null>(null);
+
+  // tx anonsu tekilleştirme
+  const lastAnnTxRef = useRef<string | undefined>(undefined);
 
   // diagnostics
   const [latestBlock, setLatestBlock] = useState<number>(0);
@@ -175,7 +173,7 @@ const chatSendRef = useRef<((text: string) => void) | null>(null);
   const pulling = useRef(false);
   const nowSec  = Math.floor(Date.now() / 1000);
 
-  // === diagnose block: confirm RPC + bytecode at address ===
+  // diagnose
   useEffect(() => {
     (async () => {
       try {
@@ -188,7 +186,6 @@ const chatSendRef = useRef<((text: string) => void) | null>(null);
           chainId: Number(net.chainId),
           msg: hasCode ? undefined : "No bytecode at VITE_CONTRACT_ADDRESS on this RPC",
         });
-        console.log("[diagnose] chainId =", Number(net.chainId), "hasCode =", hasCode);
       } catch (e:any) {
         setDiag({ msg: e?.message ?? String(e) });
       }
@@ -213,7 +210,6 @@ const chatSendRef = useRef<((text: string) => void) | null>(null);
     return set;
   }, [round]);
 
-  // full drawn list (ascending)
   const allDrawnList = useMemo(
     () => Array.from(drawnSet).sort((a, b) => a - b),
     [drawnSet]
@@ -223,21 +219,18 @@ const chatSendRef = useRef<((text: string) => void) | null>(null);
   useEffect(() => {
     if (read && CONTRACT_ADDRESS) {
       setBingo(new Contract(CONTRACT_ADDRESS, BINGO_ABI, read));
-      console.log(`[frontend] bingo read via ${readProviderName}`);
     }
     if (readWs && CONTRACT_ADDRESS) {
       setEvents(new Contract(CONTRACT_ADDRESS, BINGO_ABI, readWs));
-      console.log("[frontend] event subscription bound to WSS");
     } else {
       setEvents(undefined);
-      console.log("[frontend] no WSS; events disabled (HTTP polling only)");
     }
     if (read && USDC_ADDRESS) {
       setUsdc(new Contract(USDC_ADDRESS, ERC20_ABI, read));
     }
   }, [read, readWs, readProviderName]);
 
-  // track latest block
+  // latest block
   useEffect(() => {
     if (!read) return;
     let stop = false;
@@ -268,6 +261,19 @@ const chatSendRef = useRef<((text: string) => void) | null>(null);
     setChainId(Number(net.chainId));
   };
 
+  // son Draw event’ini loglardan bul
+  async function fetchLatestDraw(ridN: number) {
+    if (!bingo || !read) return;
+    const fromBlock = Math.max(0, (latestBlock || 0) - LAST_LOG_LOOKBACK);
+    const filter = (bingo as any).filters?.Draw?.(ridN);
+    const logs = await (bingo as any).queryFilter(filter, fromBlock);
+    if (!logs.length) return;
+    const last = logs[logs.length - 1];
+    const num = Number(last.args?.number ?? last.args?.[1]);
+    const txh: string | undefined = last.transactionHash;
+    return { num, txh };
+  }
+
   // shared pull
   const pullOnce = async () => {
     if (!bingo || pulling.current) return;
@@ -276,7 +282,6 @@ const chatSendRef = useRef<((text: string) => void) | null>(null);
       const rid: bigint = await bingo.currentRoundId();
       const ridN = Number(rid);
 
-      // On round change: clear per-round UI immediately
       setCurrentRoundId((prev) => {
         if (prev !== ridN) {
           setJoined(false);
@@ -284,6 +289,7 @@ const chatSendRef = useRef<((text: string) => void) | null>(null);
           setCard([]);
           setCardRoundId(0);
           setLastDrawn(undefined);
+          lastAnnTxRef.current = undefined;
         }
         return ridN;
       });
@@ -291,12 +297,19 @@ const chatSendRef = useRef<((text: string) => void) | null>(null);
       if (ridN > 0) {
         const r = (await bingo.roundInfo(rid)) as unknown as RoundInfo;
         setRound(r);
-        if (lastDrawn === undefined && Number(r.drawCount) > 0) {
-          const lastIndex = Number(r.drawCount); // use drawCount instead of max number
-          const allNumbers = Array.from({ length: MAX_NUMBER }, (_, i) => i + 1)
-            .filter(n => ((r.drawnMask & (1n << BigInt(n-1))) !== 0n));
-          const guessed = allNumbers[lastIndex - 1] ?? allNumbers[allNumbers.length - 1];
-          if (guessed) setLastDrawn(guessed);
+
+        // Fallback: eğer en az bir çekiliş var ve lastDrawn bilinmiyorsa loglardan bul
+        if (Number(r.drawCount) > 0 && lastDrawn === undefined) {
+          try {
+            const latest = await fetchLatestDraw(ridN);
+            if (latest?.num != null) {
+              setLastDrawn(latest.num);
+              if (latest.txh && lastAnnTxRef.current !== latest.txh) {
+                chatSendRef.current?.(`Son çekiliş: ${latest.num} • tx: ${EXPLORER}/tx/${latest.txh}`);
+                lastAnnTxRef.current = latest.txh;
+              }
+            }
+          } catch {}
         }
       } else {
         setRound(undefined);
@@ -331,7 +344,7 @@ const chatSendRef = useRef<((text: string) => void) | null>(null);
             const arr = Array.from(raw).map(Number);
             if (arr.length === 24) {
               setCard(arr);
-              setHasCard(true);            // keep visible (no blinking)
+              setHasCard(true);
               setCardRoundId(ridN);
             }
           }
@@ -364,12 +377,14 @@ const chatSendRef = useRef<((text: string) => void) | null>(null);
     const onDraw = async (_roundId: any, number: number, _idx: number, ev: any) => {
       const n = Number(number);
       setLastDrawn(n);
-      // announce into chat with tx link
       try {
         const txHash: string | undefined = ev?.log?.transactionHash || ev?.transactionHash;
-        const url = `${explorerBase(chainId)}/tx/${txHash ?? ""}`;
-        const msg = `Son çekiliş: ${n}${txHash ? ` • tx: ${url}` : ""}`;
-        chatSendRef.current?.(msg);
+        if (txHash && lastAnnTxRef.current !== txHash) {
+          chatSendRef.current?.(`Son çekiliş: ${n} • tx: ${EXPLORER}/tx/${txHash}`);
+          lastAnnTxRef.current = txHash;
+        } else if (!txHash) {
+          chatSendRef.current?.(`Son çekiliş: ${n}`);
+        }
       } catch {}
       await pullOnce();
     };
@@ -380,15 +395,13 @@ const chatSendRef = useRef<((text: string) => void) | null>(null);
     (events as any).on("RoundCreated", onAny);
     (events as any).on("Payout", onAny);
 
-    console.log("[frontend] subscribed to Draw/VRFFulfilled/RoundCreated/Payout");
-
     return () => {
       (events as any).off("Draw", onDraw);
       (events as any).off("VRFFulfilled", onAny);
       (events as any).off("RoundCreated", onAny);
       (events as any).off("Payout", onAny);
     };
-  }, [events, chainId]);
+  }, [events]);
 
   // helpers
   const withSigner = async (c: Contract) => {
@@ -469,12 +482,8 @@ const chatSendRef = useRef<((text: string) => void) | null>(null);
     } catch {}
   }, []);
 
-  const explorerBase = (cid?: number) =>
-    cid === 8453 ? "https://basescan.org" : "https://sepolia.basescan.org";
-
   return (
     <div style={styles.wrap}>
-      {/* Global styles */}
       <style>{`
         :root { color-scheme: dark; }
         html, body, #root { background: ${THEME_BG}; }
@@ -489,7 +498,6 @@ const chatSendRef = useRef<((text: string) => void) | null>(null);
 
       <TopBar chainId={chainId} account={account} onConnect={connect} />
 
-      {/* Diagnose banner */}
       {diag.msg && (
         <div style={{background:"#2a1515", border:`1px solid ${CARD_BORDER}`, padding:12, borderRadius:10, marginBottom:12, color:THEME_TEXT}}>
           <b>Config issue:</b> {diag.msg}<br/>
@@ -586,7 +594,6 @@ const chatSendRef = useRef<((text: string) => void) | null>(null);
             </div>
           </Card>
 
-          {/* ALL draws (so far) */}
           <Card title="All Draws (so far)">
             {allDrawnList.length === 0 ? (
               <div style={{ color: THEME_MUTED }}>No draws yet.</div>
@@ -606,7 +613,6 @@ const chatSendRef = useRef<((text: string) => void) | null>(null);
             <Grid90 drawn={drawnSet} last={lastDrawn} />
           </Card>
 
-          {/* Card area: show ONLY if the user actually has a card; keep visible to avoid blinking */}
           {hasCard && card.length === 24 && cardRoundId === currentRoundId && (
             <Card title="Your Card (24)">
               <div style={{ minHeight: CARD_MIN_H }}>
@@ -628,17 +634,11 @@ const chatSendRef = useRef<((text: string) => void) | null>(null);
 
       <footer style={{ margin: "40px 0", fontSize: 12, color: THEME_MUTED }}>
         Contract:{" "}
-        <a
-          href={`${explorerBase(chainId)}/address/${CONTRACT_ADDRESS}`}
-          target="_blank"
-        >
+        <a href={`${EXPLORER}/address/${CONTRACT_ADDRESS}`} target="_blank">
           {CONTRACT_ADDRESS}
         </a>{" "}
         · USDC:{" "}
-        <a
-          href={`${explorerBase(chainId)}/address/${USDC_ADDRESS}`}
-          target="_blank"
-        >
+        <a href={`${EXPLORER}/address/${USDC_ADDRESS}`} target="_blank">
           {USDC_ADDRESS}
         </a>
       </footer>
@@ -839,13 +839,11 @@ function ChatPanel({ account, roundId, onBindSend }:{ account?: string; roundId:
   const wsRef = useRef<WebSocket | null>(null);
   const listRef = useRef<HTMLDivElement | null>(null);
 
-  // persist + autoscroll
   useEffect(() => {
     localStorage.setItem("bb_chat", JSON.stringify(msgs.slice(-300)));
     if (listRef.current) listRef.current.scrollTop = listRef.current.scrollHeight;
   }, [msgs]);
 
-  // bind sender for parent announcements
   useEffect(() => {
     const sender = (t: string) => {
       const m: Msg = { id: crypto.randomUUID(), from: "system", text: t, ts: Date.now() };
@@ -857,9 +855,8 @@ function ChatPanel({ account, roundId, onBindSend }:{ account?: string; roundId:
     onBindSend(sender);
   }, [roundId]);
 
-  // websocket connect (if configured)
   useEffect(() => {
-    if (!CHAT_WSS) return; // local-only chat fallback
+    if (!CHAT_WSS) return;
     try {
       const ws = new WebSocket(CHAT_WSS);
       wsRef.current = ws;
