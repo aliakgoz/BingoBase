@@ -191,12 +191,55 @@ async function resumeIfInMiddle() {
   }
 }
 
-// Tek seferde tek draw; zincirde değişimi kontrol et
+// ---- Auto-claim: kazanan taraması ----
+async function scanAndClaim(rid) {
+  try {
+    const info = parseRoundInfo(await bingo.roundInfo(rid));
+    if (info.finalized || info.randomness === 0n) return false;
+
+    // Oyuncular yoksa yapacak bir şey yok
+    const players = await bingo.playersOf(rid);
+    if (!players || players.length === 0) return false;
+
+    // Sırayla kontrol et (çok oyuncu varsa burada batch/parallel de yapılabilir)
+    for (const p of players) {
+      try {
+        const can = await bingo.canClaimBingo(rid, p);
+        if (can) {
+          console.log(`${ts()}: [claim] Detected bingo for ${p}, claiming...`);
+          const rc = await sendReplaceable((ov) => bingo.claimBingoFor(rid, p, ov), `Claim(${rid},${p})`);
+          if (rc === null) {
+            // nonce expired gibi; zincir durumuna bak
+            const after = parseRoundInfo(await bingo.roundInfo(rid));
+            if (after.finalized) {
+              console.log(`${ts()}: [claim] Round ${rid} finalized by previous tx.`);
+              return true;
+            }
+          } else {
+            console.log(`${ts()}: [claim] Claimed for ${p}, round ${rid} finalized.`);
+            return true;
+          }
+        }
+      } catch (e) {
+        console.warn(`${ts()}: [claim] check ${p} err: ${msg(e)}`);
+      }
+    }
+  } catch (e) {
+    console.warn(`${ts()}: [claim] scan error: ${msg(e)}`);
+  }
+  return false;
+}
+
+// Tek seferde tek draw; çekilişten önce/sonra auto-claim dene
 let drawLock = false;
 async function tryDraw(rid) {
   if (drawLock) return;
   drawLock = true;
   try {
+    // Çekmeden önce bir kazan var mı?
+    const claimedBefore = await scanAndClaim(rid);
+    if (claimedBefore) return;
+
     const before = parseRoundInfo(await bingo.roundInfo(rid));
     if (before.finalized || before.drawCount >= MAX_NUMBER || before.randomness === 0n) return;
 
@@ -208,6 +251,9 @@ async function tryDraw(rid) {
     if (after.drawCount <= before.drawCount) {
       console.warn(`${ts()}: [loop] drawCount unchanged; will retry in loop`);
     }
+
+    // Çekimden sonra tekrar kontrol et (kazanan çıkmış olabilir)
+    await scanAndClaim(rid);
   } finally {
     drawLock = false;
   }
@@ -226,7 +272,9 @@ async function heartbeat(rid) {
     const stalledSec = Math.floor((Date.now() - lastProgressTs)/1000);
     if (stalledSec > 45) {
       console.warn(`${ts()}: [watchdog] stalled ${stalledSec}s, checking state...`);
-      if (inf.randomness !== 0n && !inf.finalized && inf.drawCount < MAX_NUMBER) {
+      // Önce olası kazananı dener, sonra gerekirse draw tetikler
+      const claimed = await scanAndClaim(rid);
+      if (!claimed && inf.randomness !== 0n && !inf.finalized && inf.drawCount < MAX_NUMBER) {
         await tryDraw(rid);
       }
       lastProgressTs = Date.now();
@@ -240,13 +288,17 @@ function attachEventListeners() {
   bingo.on('VRFFulfilled', async (roundId, _randomness) => {
     const rid = Number(roundId);
     console.log(`${ts()}: [event] VRF ${rid}`);
+    // VRF sonrası kazanan çıkamaz; ama hemen draw ve claim akışına sokalım
+    await scanAndClaim(rid);
     await tryDraw(rid);
   });
   bingo.on('Draw', async (roundId, _n, _i) => {
     const rid = Number(roundId);
     console.log(`${ts()}: [event] Draw ${rid}`);
     lastProgressTs = Date.now();
-    await tryDraw(rid); // bir sonrakine geç
+    // Her draw’da önce kazan var mı bak, sonra bir sonrakine geç
+    const claimed = await scanAndClaim(rid);
+    if (!claimed) await tryDraw(rid);
   });
   bingo.on('Payout', async (roundId) => {
     const rid = Number(roundId);
@@ -288,9 +340,13 @@ async function mainLoop() {
       }
 
       if (info.randomness !== 0n && info.drawCount < MAX_NUMBER) {
-        await tryDraw(rid);
-        const interval = Math.max(1, info.drawInterval || DEFAULT_DRAW_INTERVAL);
-        await sleep(interval * 1000);
+        // Çekmeden önce kazan olup olmadığını kontrol et
+        const claimed = await scanAndClaim(rid);
+        if (!claimed) {
+          await tryDraw(rid);
+          const interval = Math.max(1, info.drawInterval || DEFAULT_DRAW_INTERVAL);
+          await sleep(interval * 1000);
+        }
         await heartbeat(rid);
         continue;
       }

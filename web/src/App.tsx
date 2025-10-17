@@ -21,12 +21,13 @@ const THEME_MUTED = "#8ea0b3";     // secondary text
 const CARD_BG = "#121a23";         // card bg
 const CARD_BORDER = "#1e2a38";     // card border
 const CARD_SHADOW = "0 2px 10px rgba(0,0,0,.25)";
-//const INPUT_BG = "#0f141b";
 const CHIP_BG = "#0e1620";
 
-const ACTIVE_GREEN = "#00C853";    // drawn highlight
+const ACTIVE_GREEN = "#00C853";          // most-recent draw
 const ACTIVE_GREEN_TEXT = "#eafff2";
-const BTN_PRIMARY_BG = "#1b5eff";  // action
+const DRAWN_BLUE = "#1B4BFF";            // older drawn numbers
+const DRAWN_BLUE_TEXT = "#eaf0ff";
+const BTN_PRIMARY_BG = "#1b5eff";
 const BTN_PRIMARY_BG_DISABLED = "#2a3866";
 
 const MAX_NUMBER  = 90;
@@ -156,8 +157,12 @@ export default function App() {
   const [balance, setBalance]               = useState<bigint>(0n);
   const [joined, setJoined]                 = useState<boolean>(false);
   const [card, setCard]                     = useState<number[]>([]);
-  const [hasCard, setHasCard]               = useState<boolean>(false); // controls visibility to avoid flicker
+  const [hasCard, setHasCard]               = useState<boolean>(false); // lock-on to avoid flicker
+  const [cardRoundId, setCardRoundId]       = useState<number>(0);
   const [loadingTx, setLoadingTx]           = useState<string>("");
+
+  // drawn highlighting (only last = green)
+  const [lastDrawn, setLastDrawn]           = useState<number | undefined>(undefined);
 
   // diagnostics
   const [latestBlock, setLatestBlock] = useState<number>(0);
@@ -272,12 +277,14 @@ export default function App() {
       const rid: bigint = await bingo.currentRoundId();
       const ridN = Number(rid);
 
-      // On round change, clear per-round UI first to avoid stale card
+      // On round change: clear per-round UI immediately
       setCurrentRoundId((prev) => {
         if (prev !== ridN) {
           setJoined(false);
           setHasCard(false);
           setCard([]);
+          setCardRoundId(0);
+          setLastDrawn(undefined);
         }
         return ridN;
       });
@@ -285,6 +292,11 @@ export default function App() {
       if (ridN > 0) {
         const r = (await bingo.roundInfo(rid)) as unknown as RoundInfo;
         setRound(r);
+        // if we don't have a lastDrawn yet, infer as the highest drawIndex we have events for later (fallback: max n)
+        if (lastDrawn === undefined && r.drawnMask !== 0n) {
+          const list = Array.from({ length: MAX_NUMBER }, (_, i) => i + 1).filter(n => ((r.drawnMask & (1n << BigInt(n-1))) !== 0n));
+          if (list.length) setLastDrawn(list[list.length - 1]); // naive fallback
+        }
       } else {
         setRound(undefined);
       }
@@ -312,27 +324,21 @@ export default function App() {
           const isJoined = players.map((p) => p.toLowerCase()).includes(account.toLowerCase());
           setJoined(isJoined);
 
-          // Only fetch card if joined AND VRF is ready
           const r2 = (await bingo.roundInfo(rid)) as unknown as RoundInfo;
           if (isJoined && r2.randomness !== 0n) {
             const raw: number[] = await bingo.cardOf(rid, account);
             const arr = Array.from(raw).map(Number);
             if (arr.length === 24) {
               setCard(arr);
-              setHasCard(true); // keep visible (no blinking)
+              setHasCard(true);            // keep visible (no blinking)
+              setCardRoundId(ridN);
             }
-          } else {
-            // Do NOT wipe out an existing card during polling; just hide if not available
-            setHasCard(false);
           }
+          // IMPORTANT: do not setHasCard(false) here; we keep the last good card for this round
         } catch (e) {
           console.warn("Game state read error:", e);
-          setJoined(false);
-          setHasCard(false);
+          // Do not toggle hasCard on transient errors to avoid flicker
         }
-      } else {
-        setJoined(false);
-        setHasCard(false);
       }
     } catch (e) {
       console.error("Polling error:", e);
@@ -356,11 +362,13 @@ export default function App() {
   useEffect(() => {
     if (!events) return;
 
-    const onAny = async (..._args: any[]) => {
+    const onDraw = async (_roundId: any, number: number) => {
+      setLastDrawn(Number(number));
       await pullOnce();
     };
+    const onAny = async (..._args: any[]) => { await pullOnce(); };
 
-    events.on("Draw", onAny);
+    events.on("Draw", onDraw);
     events.on("VRFFulfilled", onAny);
     events.on("RoundCreated", onAny);
     events.on("Payout", onAny);
@@ -368,7 +376,7 @@ export default function App() {
     console.log("[frontend] subscribed to Draw/VRFFulfilled/RoundCreated/Payout");
 
     return () => {
-      events.off("Draw", onAny);
+      events.off("Draw", onDraw);
       events.off("VRFFulfilled", onAny);
       events.off("RoundCreated", onAny);
       events.off("Payout", onAny);
@@ -559,7 +567,7 @@ export default function App() {
             ) : (
               <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
                 {allDrawnList.map((n) => (
-                  <Ball key={n} n={n} active />
+                  <Ball key={n} n={n} active={n === lastDrawn} />
                 ))}
               </div>
             )}
@@ -569,14 +577,14 @@ export default function App() {
         {/* Right */}
         <div style={styles.rightCol}>
           <Card title="Live Board (1–90)">
-            <Grid90 drawn={drawnSet} />
+            <Grid90 drawn={drawnSet} last={lastDrawn} />
           </Card>
 
           {/* Card area: show ONLY if the user actually has a card; keep visible to avoid blinking */}
-          {hasCard && card.length === 24 && (
+          {hasCard && card.length === 24 && cardRoundId === currentRoundId && (
             <Card title="Your Card (24)">
               <div style={{ minHeight: CARD_MIN_H }}>
-                <GridCard card={card} drawn={drawnSet} />
+                <GridCard card={card} drawn={drawnSet} last={lastDrawn} />
               </div>
             </Card>
           )}
@@ -692,62 +700,73 @@ function Row({ label, children }: { label: string; children: any }) {
   );
 }
 
-function Grid90({ drawn }: { drawn: Set<number> }) {
+function Grid90({ drawn, last }: { drawn: Set<number>; last?: number }) {
   return (
     <div style={{ display: "grid", gridTemplateColumns: "repeat(10, 1fr)", gap: 6 }}>
-      {Array.from({ length: MAX_NUMBER }, (_, i) => i + 1).map((n) => (
-        <div
-          key={n}
-          className="hover-grow no-select"
-          style={{
-            border: `1px solid ${CARD_BORDER}`,
-            borderRadius: 8,
-            height: 32,
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-            background: drawn.has(n) ? ACTIVE_GREEN : CARD_BG,
-            color: drawn.has(n) ? ACTIVE_GREEN_TEXT : THEME_TEXT,
-            fontWeight: 700,
-          }}
-          title={String(n)}
-        >
-          {n}
-        </div>
-      ))}
+      {Array.from({ length: MAX_NUMBER }, (_, i) => i + 1).map((n) => {
+        const isDrawn = drawn.has(n);
+        const isLast = last === n;
+        return (
+          <div
+            key={n}
+            className="hover-grow no-select"
+            style={{
+              border: `1px solid ${CARD_BORDER}`,
+              borderRadius: 8,
+              height: 32,
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              background: isDrawn ? (isLast ? ACTIVE_GREEN : DRAWN_BLUE) : CARD_BG,
+              color: isDrawn ? (isLast ? ACTIVE_GREEN_TEXT : DRAWN_BLUE_TEXT) : THEME_TEXT,
+              fontWeight: 700,
+            }}
+            title={String(n)}
+          >
+            {n}
+          </div>
+        );
+      })}
     </div>
   );
 }
 
-function GridCard({ card, drawn }: { card: number[]; drawn: Set<number> }) {
+function GridCard({ card, drawn, last }: { card: number[]; drawn: Set<number>; last?: number }) {
   return (
     <div style={{ display: "grid", gridTemplateColumns: "repeat(6, 1fr)", gap: CARD_GAP }}>
-      {card.map((n, idx) => (
-        <div
-          key={idx}
-          className="hover-grow no-select"
-          style={{
-            border: `1px solid ${CARD_BORDER}`,
-            borderRadius: 10,
-            height: CARD_CELL_H,
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-            background: drawn.has(n) ? ACTIVE_GREEN : CARD_BG,
-            color: drawn.has(n) ? ACTIVE_GREEN_TEXT : THEME_TEXT,
-            fontWeight: 800,
-            fontSize: 16,
-          }}
-          title={String(n)}
-        >
-          {n}
-        </div>
-      ))}
+      {card.map((n, idx) => {
+        const isDrawn = drawn.has(n);
+        const isLast = last === n;
+        return (
+          <div
+            key={idx}
+            className="hover-grow no-select"
+            style={{
+              border: `1px solid ${CARD_BORDER}`,
+              borderRadius: 10,
+              height: CARD_CELL_H,
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              background: isDrawn ? (isLast ? ACTIVE_GREEN : DRAWN_BLUE) : CARD_BG,
+              color: isDrawn ? (isLast ? ACTIVE_GREEN_TEXT : DRAWN_BLUE_TEXT) : THEME_TEXT,
+              fontWeight: 800,
+              fontSize: 16,
+            }}
+            title={String(n)}
+          >
+            {n}
+          </div>
+        );
+      })}
     </div>
   );
 }
 
 function Ball({ n, active = false }: { n: number; active?: boolean }) {
+  const isLast = active;
+  const bg = isLast ? ACTIVE_GREEN : DRAWN_BLUE;
+  const fg = isLast ? ACTIVE_GREEN_TEXT : DRAWN_BLUE_TEXT;
   return (
     <div
       className="hover-grow no-select"
@@ -758,8 +777,8 @@ function Ball({ n, active = false }: { n: number; active?: boolean }) {
         display: "flex",
         alignItems: "center",
         justifyContent: "center",
-        background: active ? ACTIVE_GREEN : CARD_BG,
-        color: active ? ACTIVE_GREEN_TEXT : THEME_TEXT,
+        background: bg,
+        color: fg,
         border: `1px solid ${CARD_BORDER}`,
         fontWeight: 800,
       }}
