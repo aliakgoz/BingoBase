@@ -474,6 +474,49 @@ export default function App() {
   };
   // -----------------------------------------------
 
+  // ===== GLOBAL mouse-reactive BACKGROUND (whole page) =====
+  const pgRaf = useRef<number | null>(null);
+  const pgTarget = useRef({ x: 0, y: 0 });
+  const pgCurrent = useRef({ x: 0, y: 0 });
+
+  const setPageVars = (x:number, y:number) => {
+    const root = document.documentElement;
+    root.style.setProperty("--pmx", String(x)); // -1..1
+    root.style.setProperty("--pmy", String(y));
+  };
+
+  useEffect(() => {
+    const lerp = () => {
+      pgCurrent.current.x += (pgTarget.current.x - pgCurrent.current.x) * 0.1;
+      pgCurrent.current.y += (pgTarget.current.y - pgCurrent.current.y) * 0.1;
+      setPageVars(pgCurrent.current.x, pgCurrent.current.y);
+      pgRaf.current = requestAnimationFrame(lerp);
+    };
+    const onMove = (e: MouseEvent) => {
+      const nx = (e.clientX / window.innerWidth) * 2 - 1;   // -1..1
+      const ny = (e.clientY / window.innerHeight) * 2 - 1;  // -1..1
+      pgTarget.current.x = Math.max(-1, Math.min(1, nx));
+      pgTarget.current.y = Math.max(-1, Math.min(1, ny));
+      if (pgRaf.current == null) pgRaf.current = requestAnimationFrame(lerp);
+    };
+    const onLeave = () => {
+      pgTarget.current.x = 0; pgTarget.current.y = 0;
+      if (pgRaf.current == null) pgRaf.current = requestAnimationFrame(lerp);
+    };
+
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseleave", onLeave);
+    pgRaf.current = requestAnimationFrame(lerp);
+
+    return () => {
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseleave", onLeave);
+      if (pgRaf.current) cancelAnimationFrame(pgRaf.current);
+      pgRaf.current = null;
+    };
+  }, []);
+  // =========================================================
+
   // Set tab title + favicon
   useEffect(() => {
     try {
@@ -492,8 +535,70 @@ export default function App() {
   return (
     <div style={styles.wrap}>
       <style>{`
-        :root { color-scheme: dark; }
+        :root { color-scheme: dark; --pmx:0; --pmy:0; }
         html, body, #root { background: ${THEME_BG}; }
+
+        /* === FULL-PAGE reactive layers (behind everything) === */
+        .bb-global-bg{
+          position: fixed; inset: 0; z-index: 0; pointer-events: none; overflow:hidden;
+          background:
+            radial-gradient(1600px 800px at calc(80% + var(--pmx)*10%) calc(-5% + var(--pmy)*4%),
+              rgba(27,94,255,.12), transparent 60%),
+            radial-gradient(1200px 700px at calc(15% + var(--pmx)*-8%) calc(110% + var(--pmy)*10%),
+              rgba(0,200,83,.09), transparent 60%),
+            linear-gradient(180deg, #0b0f14 0%, #0a0e15 50%, #0a0f17 100%);
+        }
+        .bb-global-scan{
+          position:absolute; inset:-20%;
+          background: repeating-linear-gradient(115deg, rgba(150,190,255,.05) 0 6px, transparent 6px 18px);
+          transform:
+            translate3d(calc(var(--pmx)*24px), calc(var(--pmy)*28px), 0)
+            skewY(-6deg);
+          animation: bg-scan 24s linear infinite;
+          mix-blend:overlay;
+          mask-image: radial-gradient(65% 60% at 50% 40%, black 55%, transparent 75%);
+          opacity:.8; will-change: transform;
+        }
+        .bb-global-scan.alt{
+          animation-duration: 36s; opacity:.45;
+          transform:
+            translate3d(calc(var(--pmx)*-18px), calc(var(--pmy)*-22px), 0)
+            skewY(-8deg);
+        }
+        @keyframes bg-scan{
+          to{
+            transform:
+              translate3d(calc(var(--pmx)*24px), calc(var(--pmy)*28px), 0)
+              skewY(-6deg) translateY(-12%);
+          }
+        }
+        .bb-orb-a, .bb-orb-b, .bb-orb-c{
+          position:absolute; border-radius:50%;
+          filter: blur(22px); mix-blend:screen; pointer-events:none; opacity:.22; will-change: transform;
+        }
+        .bb-orb-a{
+          width:520px; height:520px; right:-120px; top:-100px;
+          background: radial-gradient(closest-side, rgba(27,94,255,.55), transparent);
+          transform: translate3d(calc(var(--pmx)*42px), calc(var(--pmy)*34px), 0);
+        }
+        .bb-orb-b{
+          width:420px; height:420px; left:-120px; bottom:-120px;
+          background: radial-gradient(closest-side, rgba(0,200,83,.48), transparent);
+          transform: translate3d(calc(var(--pmx)*-36px), calc(var(--pmy)*-30px), 0);
+        }
+        .bb-orb-c{
+          width:380px; height:380px; left:35%; top:-140px;
+          background: radial-gradient(closest-side, rgba(0,180,255,.35), transparent);
+          transform: translate3d(calc(var(--pmx)*18px), calc(var(--pmy)*12px), 0);
+          opacity:.18;
+        }
+
+        @media (max-width: 768px){
+          .bb-global-scan, .bb-global-scan.alt { transform: none; }
+          .bb-orb-a, .bb-orb-b, .bb-orb-c { transform: none; }
+        }
+        /* === /FULL-PAGE BG === */
+
         @media (max-width: 1200px) { .cols { grid-template-columns: 1fr; } }
         .hover-grow { transition: transform .14s ease, box-shadow .14s ease; }
         .hover-grow:hover { transform: scale(2); box-shadow: 0 6px 20px rgba(0,0,0,.35); }
@@ -501,10 +606,19 @@ export default function App() {
         a{ color:#9ecbff }
       `}</style>
 
+      {/* GLOBAL BACKGROUND LAYERS */}
+      <div className="bb-global-bg" aria-hidden="true">
+        <div className="bb-global-scan" />
+        <div className="bb-global-scan alt" />
+        <div className="bb-orb-a" />
+        <div className="bb-orb-b" />
+        <div className="bb-orb-c" />
+      </div>
+
       <Header />
 
       {/* ===== PROMO BANNER ===== */}
-      <section className="bb-banner" role="region" aria-label="BingoBase promo" style={{margin:"18px 0"}}>
+      <section className="bb-banner" role="region" aria-label="BingoBase promo" style={{margin:"18px 0", position:"relative", zIndex:1}}>
         <style>{`
           .bb-banner{
             --bg1:#0a0f17;--bg2:#0c1220;--c1:#e7eef7;--c2:#8ea0b3;--acc:#1b5eff;--chip:#0e1620;--glow:#4da3ff;
@@ -1012,8 +1126,10 @@ const styles: Record<string, React.CSSProperties> = {
     margin: "24px auto",
     padding: "0 24px",
     fontFamily: "Inter, system-ui, Arial",
-    background: THEME_BG,
+    background: "transparent", // global bg altta
     color: THEME_TEXT,
+    position: "relative",
+    zIndex: 1, // global bg'nin üstünde
   },
   columns: {
     display: "grid",
@@ -1031,6 +1147,7 @@ const styles: Record<string, React.CSSProperties> = {
     background: CARD_BG,
     boxShadow: CARD_SHADOW,
     marginBottom: 18,
+    backdropFilter: "saturate(120%)",
   },
 };
 
