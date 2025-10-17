@@ -9,9 +9,9 @@ const PK        = process.env.SYSTEM_PK;
 const CONTRACT  = process.env.CONTRACT;
 
 const MAX_NUMBER = 90;
-const DEFAULT_JOIN_WINDOW_SEC = 120;  // 2 minutes
-const DEFAULT_DRAW_INTERVAL   = 1;    // 1 second
-const POLL_MS                 = 1500;
+const DEFAULT_JOIN_WINDOW_SEC = 240;  // 2 minutes
+const DEFAULT_DRAW_INTERVAL   = 5;    // 1 second
+const POLL_MS                 = 3000;
 const AFTER_90_COOLDOWN_MS    = 3000;
 
 if (!RPC || !PK || !CONTRACT) {
