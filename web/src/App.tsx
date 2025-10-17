@@ -170,6 +170,18 @@ export default function App() {
   type Feed = { n: number; tx?: string; ts: number };
   const [drawFeed, setDrawFeed] = useState<Feed[]>([]);
 
+  // winner / payout duyurusu
+  type PayoutInfo = {
+    roundId: number;
+    winner: string;
+    winnerUSDC: bigint;
+    feeUSDC: bigint;
+    tx?: string;
+    ts: number;
+  };
+  const [lastPayout, setLastPayout] = useState<PayoutInfo | null>(null);
+
+
   // diagnostics
   const [latestBlock, setLatestBlock] = useState<number>(0);
   const [diag, setDiag] = useState<{ hasCode?: boolean; chainId?: number; msg?: string }>({});
@@ -286,6 +298,28 @@ export default function App() {
     return tail;
   }
 
+  // helper: round için son Payout log'unu bul (tx hash dahil)
+  async function fetchLatestPayout(ridN: number) {
+    if (!bingo || !read) return null;
+    const fromBlock = Math.max(0, (latestBlock || 0) - LAST_LOG_LOOKBACK);
+    const filter = (bingo as any).filters?.Payout?.(ridN);
+    const logs = await (bingo as any).queryFilter(filter, fromBlock);
+    const last = logs.slice(-1)[0];
+    if (!last) return null;
+    const [roundId, winner, winnerUSDC, feeUSDC] = last.args || [];
+    return {
+      roundId: Number(roundId),
+      winner: String(winner),
+      winnerUSDC: BigInt(winnerUSDC),
+      feeUSDC: BigInt(feeUSDC),
+      tx: last.transactionHash as string | undefined,
+      ts: Date.now(),
+    } as PayoutInfo;
+  }
+
+  
+
+
   // shared pull
   const pullOnce = async () => {
     if (!bingo || pulling.current) return;
@@ -309,6 +343,27 @@ export default function App() {
       if (ridN > 0) {
         const r = (await bingo.roundInfo(rid)) as unknown as RoundInfo;
         setRound(r);
+
+        // round finalized ise ve winner var ise, payout event'ini yakala (ilk yüklemede/refresh'te)
+          try {
+            if (r.finalized && r.winner && r.winner !== "0x0000000000000000000000000000000000000000") {
+              if (!lastPayout || lastPayout.roundId !== Number(rid)) {
+                const p = await fetchLatestPayout(Number(rid));
+                if (p) setLastPayout(p);
+                else {
+                  // event WSS ile yakalanmamış olabilir; yine de minimal bilgi göster
+                  setLastPayout({
+                    roundId: Number(rid),
+                    winner: r.winner,
+                    winnerUSDC: r.prizePoolUSDC, // pool tamamı winner'a
+                    feeUSDC: 0n,
+                    tx: undefined,
+                    ts: Date.now(),
+                  });
+                }
+              }
+            }
+          } catch {}
 
         if (Number(r.drawCount) > 0 && lastDrawn === undefined) {
           try {
@@ -395,12 +450,14 @@ export default function App() {
     (events as any).on("VRFFulfilled", onAny);
     (events as any).on("RoundCreated", onAny);
     (events as any).on("Payout", onAny);
+     (events as any).on("Payout", onPayout);
 
     return () => {
       (events as any).off("Draw", onDraw);
       (events as any).off("VRFFulfilled", onAny);
       (events as any).off("RoundCreated", onAny);
       (events as any).off("Payout", onAny);
+      (events as any).off("Payout", onPayout);
     };
   }, [events]);
 
@@ -423,6 +480,25 @@ export default function App() {
       alert(e?.shortMessage ?? e?.message ?? "Approve failed");
     } finally { setLoadingTx(""); }
   };
+
+      const onPayout = async (_roundId: any, winner: string, winnerUSDC: bigint, feeUSDC: bigint, ev: any) => {
+      try {
+        const txHash: string | undefined = ev?.log?.transactionHash || ev?.transactionHash;
+        setLastPayout({
+          roundId: Number(_roundId),
+          winner: String(winner),
+          winnerUSDC: BigInt(winnerUSDC),
+          feeUSDC: BigInt(feeUSDC),
+          tx: txHash,
+          ts: Date.now(),
+        });
+      } catch {}
+      await pullOnce();
+    };
+
+   
+
+   
 
   const doJoin = async () => {
     if (!bingo || !round || currentRoundId === 0) return;
@@ -770,6 +846,55 @@ export default function App() {
       </div>
 
       <TopBar chainId={chainId} account={account} onConnect={connect} />
+
+      {/* WINNER / PAYOUT DUYURUSU */}
+{lastPayout && (
+  <div
+    role="status"
+    style={{
+      position: "relative",
+      zIndex: 2,
+      margin: "8px 0 12px",
+      padding: "12px 14px",
+      borderRadius: 12,
+      background: "linear-gradient(180deg, rgba(0,200,83,.12), rgba(0,0,0,.06))",
+      border: `1px solid ${CARD_BORDER}`,
+      color: THEME_TEXT,
+      boxShadow: "0 8px 24px rgba(0,0,0,.25)"
+    }}
+  >
+    <div style={{display:"flex", alignItems:"center", gap:10, flexWrap:"wrap"}}>
+      <span style={{
+        width:10, height:10, borderRadius:6, background: ACTIVE_GREEN,
+        display:"inline-block", boxShadow:"0 0 12px rgba(0,200,83,.6)"
+      }} />
+      <strong style={{fontWeight:800}}>Winner announced!</strong>
+      <span style={{opacity:.9}}>
+        Round <b>#{lastPayout.roundId}</b> —{" "}
+        <a
+          href={`${EXPLORER}/address/${lastPayout.winner}`}
+          target="_blank" rel="noreferrer"
+          style={{color:"#9ecbff", fontWeight:700}}
+        >
+          {lastPayout.winner.slice(0,6)}…{lastPayout.winner.slice(-4)}
+        </a>{" "}
+        received{" "}
+        <b>{Number(formatUnits(lastPayout.winnerUSDC, decimals)).toFixed(2)} {symbol}</b>.
+      </span>
+      {lastPayout.tx ? (
+        <a
+          href={`${EXPLORER}/tx/${lastPayout.tx}`}
+          target="_blank" rel="noreferrer"
+          style={{marginLeft:8, color:"#9ecbff", fontWeight:700}}
+        >
+          View payout tx →
+        </a>
+      ) : (
+        <span style={{marginLeft:8, color:THEME_MUTED}}>(tx pending)</span>
+      )}
+    </div>
+  </div>
+)}
 
       {diag.msg && (
         <div style={{background:"#2a1515", border:`1px solid ${CARD_BORDER}`, padding:12, borderRadius:10, marginBottom:12, color:THEME_TEXT}}>
