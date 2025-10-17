@@ -697,6 +697,28 @@ export default function App() {
           }
         `}</style>
 
+         <div style={{ display: "flex", justifyContent: "flex-end", marginTop: -6, marginBottom: 12, position:"relative", zIndex:1 }}>
+        {account ? (
+          <code
+            className="no-select"
+            style={{
+              fontSize: 12,
+              background: CHIP_BG,
+              padding: "6px 10px",
+              borderRadius: 8,
+              color: THEME_TEXT,
+              border: `1px solid ${CARD_BORDER}`
+            }}
+          >
+            {account.slice(0, 6)}…{account.slice(-4)}
+          </code>
+        ) : (
+          <button style={btnPrimary(true)} onClick={connect}>Connect Wallet</button>
+        )}
+      </div>
+
+      <TopBar chainId={chainId} account={account} onConnect={connect} />
+
         <div className="bb-lines" aria-hidden="true"></div>
 
         <div className="bb-banner__inner">
@@ -856,12 +878,26 @@ export default function App() {
         </div>
       </section>
 
-      <footer style={{ margin: "32px 0", fontSize: 12, color: THEME_MUTED }}>
-        Contract:{" "}
-        <a href={`${EXPLORER}/address/${CONTRACT_ADDRESS}`} target="_blank">{CONTRACT_ADDRESS}</a>{" "}
-        · USDC:{" "}
-        <a href={`${EXPLORER}/address/${USDC_ADDRESS}`} target="_blank">{USDC_ADDRESS}</a>
-      </footer>
+     <footer
+          style={{
+            position: "relative",
+            zIndex: 2,                 // global bg'nin üstünde kalsın
+            margin: "32px 0",
+            paddingBottom: 24,         // sayfa sonuna yapışmasın
+            textAlign: "center",       // istersen sola alabilirsin
+            fontSize: 12,
+            color: THEME_MUTED,
+          }}
+        >
+          Contract:{" "}
+          <a href={`${EXPLORER}/address/${CONTRACT_ADDRESS}`} target="_blank" rel="noreferrer">
+            {CONTRACT_ADDRESS}
+          </a>{" "}
+          · USDC:{" "}
+          <a href={`${EXPLORER}/address/${USDC_ADDRESS}`} target="_blank" rel="noreferrer">
+            {USDC_ADDRESS}
+          </a>
+        </footer>
     </div>
   );
 }
