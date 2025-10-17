@@ -697,27 +697,9 @@ export default function App() {
           }
         `}</style>
 
-         <div style={{ display: "flex", justifyContent: "flex-end", marginTop: -6, marginBottom: 12, position:"relative", zIndex:1 }}>
-        {account ? (
-          <code
-            className="no-select"
-            style={{
-              fontSize: 12,
-              background: CHIP_BG,
-              padding: "6px 10px",
-              borderRadius: 8,
-              color: THEME_TEXT,
-              border: `1px solid ${CARD_BORDER}`
-            }}
-          >
-            {account.slice(0, 6)}…{account.slice(-4)}
-          </code>
-        ) : (
-          <button style={btnPrimary(true)} onClick={connect}>Connect Wallet</button>
-        )}
-      </div>
 
-      <TopBar chainId={chainId} account={account} onConnect={connect} />
+
+      
 
         <div className="bb-lines" aria-hidden="true"></div>
 
@@ -766,6 +748,26 @@ export default function App() {
         </div>
       </section>
       {/* ===== /PROMO BANNER ===== */}
+
+               <div style={{ display: "flex", justifyContent: "flex-end", marginTop: -6, marginBottom: 12, position:"relative", zIndex:1 }}>
+        {account ? (
+          <code
+            className="no-select"
+            style={{
+              fontSize: 12,
+              background: CHIP_BG,
+              padding: "6px 10px",
+              borderRadius: 8,
+              color: THEME_TEXT,
+              border: `1px solid ${CARD_BORDER}`
+            }}
+          >
+            {account.slice(0, 6)}…{account.slice(-4)}
+          </code>
+        ) : (
+          <button style={btnPrimary(true)} onClick={connect}>Connect Wallet</button>
+        )}
+      </div>
 
       <TopBar chainId={chainId} account={account} onConnect={connect} />
 
