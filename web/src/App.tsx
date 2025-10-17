@@ -496,7 +496,7 @@ export default function App() {
         html, body, #root { background: ${THEME_BG}; }
         @media (max-width: 1200px) { .cols { grid-template-columns: 1fr; } }
         .hover-grow { transition: transform .14s ease, box-shadow .14s ease; }
-        .hover-grow:hover { transform: scale(1.06); box-shadow: 0 6px 20px rgba(0,0,0,.35); }
+        .hover-grow:hover { transform: scale(3); box-shadow: 0 6px 20px rgba(0,0,0,.35); }
         .no-select { user-select: none; }
         a{ color:#9ecbff }
       `}</style>
@@ -518,7 +518,7 @@ export default function App() {
           .bb-banner__inner{max-width:1100px;margin:0 auto;display:grid;gap:18px;grid-template-columns:120px 1fr;align-items:center}
           .bb-banner__logo-wrap{display:flex;align-items:center;justify-content:center}
           .bb-banner__inner{ min-height:220px; }
-          .bb-banner__logo{ width:160px; }    /* isteğe bağlı */
+          .bb-banner__logo{ height:320px; }    /* isteğe bağlı */
           .bb-banner__logo{
             width:120px;height:auto;filter:drop-shadow(0 10px 30px rgba(0,0,0,.45));
             animation: bb-pop .6s ease-out both, bb-breathe 4.5s ease-in-out infinite;
