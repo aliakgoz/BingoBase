@@ -16,8 +16,8 @@ const RPC_WSS          = (import.meta.env.VITE_RPC_WSS as string) || "";
 const CHAT_WSS         = (import.meta.env.VITE_CHAT_WSS as string) || "";
 
 // ===== CONSTS =====
-const EXPLORER = "https://basescan.org"; // mainnet Base explorer
-const LAST_LOG_LOOKBACK = 20000;          // son Draw'ı ararken blok aralığı
+const EXPLORER = "https://basescan.org"; // Base mainnet
+const LAST_LOG_LOOKBACK = 20000;          // blocks to look back for Draw logs
 
 // ===== THEME =====
 const THEME_BG = "#0b0f14";
@@ -38,7 +38,7 @@ const BTN_PRIMARY_BG_DISABLED = "#2a3866";
 const MAX_NUMBER  = 90;
 const CARD_SIZE   = 24;
 
-// Fixed grid metrics
+// fixed grid metrics
 const CARD_CELL_H = 44;
 const CARD_GAP    = 8;
 const CARD_ROWS   = 4;
@@ -111,11 +111,8 @@ function useProviders() {
   const [write, setWrite] = useState<BrowserProvider>();
   useEffect(() => {
     if ((window as any).ethereum) {
-      try {
-        setWrite(new BrowserProvider((window as any).ethereum));
-      } catch (e) {
-        console.warn("BrowserProvider init failed:", e);
-      }
+      try { setWrite(new BrowserProvider((window as any).ethereum)); }
+      catch (e) { console.warn("BrowserProvider init failed:", e); }
     }
   }, []);
 
@@ -134,9 +131,7 @@ export default function App() {
   const read = readWs ?? readHttp;
   useEffect(() => {
     setReadProviderName(readWs ? "WSS" : (readHttp ? "HTTP" : "(none)"));
-    if (!readWs && !readHttp) {
-      console.error("No RPC providers configured.");
-    }
+    if (!readWs && !readHttp) console.error("No RPC providers configured.");
   }, [readWs, readHttp]);
 
   // contracts
@@ -160,11 +155,9 @@ export default function App() {
   // drawn highlighting (only last = green)
   const [lastDrawn, setLastDrawn]           = useState<number | undefined>(undefined);
 
-  // chat sender binding
-  const chatSendRef = useRef<((text: string) => void) | null>(null);
-
-  // tx anonsu tekilleştirme
-  const lastAnnTxRef = useRef<string | undefined>(undefined);
+  // last 5 draws feed
+  type Feed = { n: number; tx?: string; ts: number };
+  const [drawFeed, setDrawFeed] = useState<Feed[]>([]);
 
   // diagnostics
   const [latestBlock, setLatestBlock] = useState<number>(0);
@@ -173,7 +166,7 @@ export default function App() {
   const pulling = useRef(false);
   const nowSec  = Math.floor(Date.now() / 1000);
 
-  // diagnose
+  // diagnose bytecode & chainId
   useEffect(() => {
     (async () => {
       try {
@@ -181,11 +174,7 @@ export default function App() {
         const p = new JsonRpcProvider(RPC_URL);
         const [net, code] = await Promise.all([p.getNetwork(), p.getCode(CONTRACT_ADDRESS)]);
         const hasCode = !!code && code !== "0x";
-        setDiag({
-          hasCode,
-          chainId: Number(net.chainId),
-          msg: hasCode ? undefined : "No bytecode at VITE_CONTRACT_ADDRESS on this RPC",
-        });
+        setDiag({ hasCode, chainId: Number(net.chainId), msg: hasCode ? undefined : "No bytecode at VITE_CONTRACT_ADDRESS on this RPC" });
       } catch (e:any) {
         setDiag({ msg: e?.message ?? String(e) });
       }
@@ -217,33 +206,21 @@ export default function App() {
 
   // init contracts
   useEffect(() => {
-    if (read && CONTRACT_ADDRESS) {
-      setBingo(new Contract(CONTRACT_ADDRESS, BINGO_ABI, read));
-    }
-    if (readWs && CONTRACT_ADDRESS) {
-      setEvents(new Contract(CONTRACT_ADDRESS, BINGO_ABI, readWs));
-    } else {
-      setEvents(undefined);
-    }
-    if (read && USDC_ADDRESS) {
-      setUsdc(new Contract(USDC_ADDRESS, ERC20_ABI, read));
-    }
+    if (read && CONTRACT_ADDRESS) setBingo(new Contract(CONTRACT_ADDRESS, BINGO_ABI, read));
+    if (readWs && CONTRACT_ADDRESS) setEvents(new Contract(CONTRACT_ADDRESS, BINGO_ABI, readWs));
+    else setEvents(undefined);
+    if (read && USDC_ADDRESS) setUsdc(new Contract(USDC_ADDRESS, ERC20_ABI, read));
   }, [read, readWs, readProviderName]);
 
   // latest block
   useEffect(() => {
     if (!read) return;
     let stop = false;
-
     const tick = async () => {
-      try {
-        const bn = await read.getBlockNumber();
-        if (!stop) setLatestBlock(bn);
-      } catch {}
+      try { const bn = await read.getBlockNumber(); if (!stop) setLatestBlock(bn); } catch {}
       if (!stop) setTimeout(tick, readWs ? 1000 : 3000);
     };
     tick();
-
     if (readWs) {
       const onBlock = (b: number) => setLatestBlock(b);
       readWs.on("block", onBlock);
@@ -261,17 +238,18 @@ export default function App() {
     setChainId(Number(net.chainId));
   };
 
-  // son Draw event’ini loglardan bul
-  async function fetchLatestDraw(ridN: number) {
-    if (!bingo || !read) return;
+  // helpers to read latest 1..5 Draw logs
+  async function fetchLatestDraws(ridN: number, take = 5) {
+    if (!bingo || !read) return [];
     const fromBlock = Math.max(0, (latestBlock || 0) - LAST_LOG_LOOKBACK);
     const filter = (bingo as any).filters?.Draw?.(ridN);
     const logs = await (bingo as any).queryFilter(filter, fromBlock);
-    if (!logs.length) return;
-    const last = logs[logs.length - 1];
-    const num = Number(last.args?.number ?? last.args?.[1]);
-    const txh: string | undefined = last.transactionHash;
-    return { num, txh };
+    const tail = logs.slice(-take).map((lg:any) => ({
+      n: Number(lg.args?.number ?? lg.args?.[1]),
+      tx: lg.transactionHash as string | undefined,
+      ts: Date.now(),
+    }));
+    return tail;
   }
 
   // shared pull
@@ -289,7 +267,7 @@ export default function App() {
           setCard([]);
           setCardRoundId(0);
           setLastDrawn(undefined);
-          lastAnnTxRef.current = undefined;
+          setDrawFeed([]); // reset feed on round change
         }
         return ridN;
       });
@@ -298,16 +276,13 @@ export default function App() {
         const r = (await bingo.roundInfo(rid)) as unknown as RoundInfo;
         setRound(r);
 
-        // Fallback: eğer en az bir çekiliş var ve lastDrawn bilinmiyorsa loglardan bul
+        // seed lastDrawn + feed if needed
         if (Number(r.drawCount) > 0 && lastDrawn === undefined) {
           try {
-            const latest = await fetchLatestDraw(ridN);
-            if (latest?.num != null) {
-              setLastDrawn(latest.num);
-              if (latest.txh && lastAnnTxRef.current !== latest.txh) {
-                chatSendRef.current?.(`Son çekiliş: ${latest.num} • tx: ${EXPLORER}/tx/${latest.txh}`);
-                lastAnnTxRef.current = latest.txh;
-              }
+            const latest = await fetchLatestDraws(ridN, 5);
+            if (latest.length) {
+              setLastDrawn(latest[latest.length - 1].n);
+              setDrawFeed(latest.reverse().slice(0,5)); // newest first
             }
           } catch {}
         }
@@ -327,9 +302,7 @@ export default function App() {
           setDecimals(Number(dec));
           setBalance(bal);
           setAllowance(allo);
-        } catch (e) {
-          console.warn("ERC20 read error:", e);
-        }
+        } catch (e) { console.warn("ERC20 read error:", e); }
       }
 
       if (bingo && account && ridN > 0) {
@@ -348,9 +321,7 @@ export default function App() {
               setCardRoundId(ridN);
             }
           }
-        } catch (e) {
-          console.warn("Game state read error:", e);
-        }
+        } catch (e) { console.warn("Game state read error:", e); }
       }
     } catch (e) {
       console.error("Polling error:", e);
@@ -379,13 +350,10 @@ export default function App() {
       setLastDrawn(n);
       try {
         const txHash: string | undefined = ev?.log?.transactionHash || ev?.transactionHash;
-        if (txHash && lastAnnTxRef.current !== txHash) {
-          chatSendRef.current?.(`Son çekiliş: ${n} • tx: ${EXPLORER}/tx/${txHash}`);
-          lastAnnTxRef.current = txHash;
-        } else if (!txHash) {
-          chatSendRef.current?.(`Son çekiliş: ${n}`);
-        }
-      } catch {}
+        setDrawFeed((prev) => [{ n, tx: txHash, ts: Date.now() }, ...prev].slice(0,5));
+      } catch {
+        setDrawFeed((prev) => [{ n, ts: Date.now() }, ...prev].slice(0,5));
+      }
       await pullOnce();
     };
     const onAny = async (..._args: any[]) => { await pullOnce(); };
@@ -403,7 +371,7 @@ export default function App() {
     };
   }, [events]);
 
-  // helpers
+  // signer helper
   const withSigner = async (c: Contract) => {
     if (!write) throw new Error("No wallet");
     const signer = await write.getSigner();
@@ -415,17 +383,12 @@ export default function App() {
     try {
       setLoadingTx("Approve...");
       const c = await withSigner(usdc);
-      const tx = await (c as any).approve(
-        CONTRACT_ADDRESS,
-        parseUnits("10", decimals)
-      );
+      const tx = await (c as any).approve(CONTRACT_ADDRESS, parseUnits("10", decimals));
       await tx.wait();
       await pullOnce();
-    } catch (e: any) {
+    } catch (e:any) {
       alert(e?.shortMessage ?? e?.message ?? "Approve failed");
-    } finally {
-      setLoadingTx("");
-    }
+    } finally { setLoadingTx(""); }
   };
 
   const doJoin = async () => {
@@ -436,11 +399,9 @@ export default function App() {
       const tx = await (c as any).joinRound(currentRoundId);
       await tx.wait();
       await pullOnce();
-    } catch (e: any) {
+    } catch (e:any) {
       alert(e?.shortMessage ?? e?.message ?? "Join failed");
-    } finally {
-      setLoadingTx("");
-    }
+    } finally { setLoadingTx(""); }
   };
 
   const entryStr =
@@ -456,9 +417,7 @@ export default function App() {
     if (!round) return "-";
     if (round.finalized) return "Round finished";
     if (round.randomness === 0n) {
-      return nowSec < Number(round.joinDeadline)
-        ? "Join window open"
-        : "Waiting for VRF";
+      return nowSec < Number(round.joinDeadline) ? "Join window open" : "Waiting for VRF";
     }
     return `Drawing... (${round.drawCount}/${MAX_NUMBER})`;
   }, [round, nowSec]);
@@ -469,11 +428,7 @@ export default function App() {
       document.title = "BingoBase.io";
       const setIcon = (href: string, rel: string) => {
         let link = document.querySelector(`link[rel='${rel}']`) as HTMLLinkElement | null;
-        if (!link) {
-          link = document.createElement('link');
-          link.rel = rel;
-          document.head.appendChild(link);
-        }
+        if (!link) { link = document.createElement('link'); link.rel = rel; document.head.appendChild(link); }
         link.href = href;
       };
       setIcon('/BingoBase4.png', 'icon');
@@ -489,7 +444,7 @@ export default function App() {
         html, body, #root { background: ${THEME_BG}; }
         @media (max-width: 1200px) { .cols { grid-template-columns: 1fr; } }
         .hover-grow { transition: transform .14s ease, box-shadow .14s ease; }
-        .hover-grow:hover { transform: scale(1.24); box-shadow: 0 6px 20px rgba(0,0,0,.35); }
+        .hover-grow:hover { transform: scale(1.06); box-shadow: 0 6px 20px rgba(0,0,0,.35); }
         .no-select { user-select: none; }
         a{ color:#9ecbff }
       `}</style>
@@ -516,19 +471,6 @@ export default function App() {
         </div>
       )}
 
-      <section style={styles.hero}>
-        <div>
-          <h1 style={{ margin: 0, fontSize: 36, color: THEME_TEXT }}>BingoBase.io</h1>
-          <p style={{ marginTop: 8, color: THEME_MUTED }}>
-            Provably fair on-chain Bingo on Base • Chainlink VRF v2.5
-          </p>
-          <div style={{fontSize:12, color:THEME_MUTED, marginTop:6}}>
-            Read via: <b style={{color:THEME_TEXT}}>{readProviderName}</b> · Latest block: <b style={{color:THEME_TEXT}}>{latestBlock || "-"}</b>
-          </div>
-        </div>
-        <img src="/BingoBase4.png" alt="logo" style={{ height: 56, filter:"drop-shadow(0 2px 8px rgba(0,0,0,.5))" }} />
-      </section>
-
       <section className="cols" style={styles.columns}>
         {/* Left */}
         <div style={styles.leftCol}>
@@ -537,53 +479,28 @@ export default function App() {
             <Row label="Entry Fee">{entryStr}</Row>
             <Row label="Prize Pool">{prizeStr}</Row>
             <Row label="Start">
-              {round
-                ? new Date(Number(round.startTime) * 1000).toLocaleString()
-                : "-"}
+              {round ? new Date(Number(round.startTime) * 1000).toLocaleString() : "-"}
             </Row>
             <Row label="Join Window">
-              {round
-                ? nowSec < Number(round.joinDeadline)
-                  ? `${Math.max(0, Number(round.joinDeadline) - nowSec)}s left`
-                  : "Closed"
-                : "-"}
+              {round ? (nowSec < Number(round.joinDeadline) ? `${Math.max(0, Number(round.joinDeadline) - nowSec)}s left` : "Closed") : "-"}
             </Row>
             <Row label="Status">{statusText}</Row>
 
             <div style={{ display: "flex", gap: 8, marginTop: 12, flexWrap: "wrap" }}>
               <button
-                style={btnPrimary(
-                  !!account &&
-                    canJoin &&
-                    allowance >= (round?.entryFeeUSDC ?? 0n) &&
-                    loadingTx === ""
-                )}
-                disabled={
-                  !account ||
-                  !canJoin ||
-                  loadingTx !== "" ||
-                  !round ||
-                  allowance < (round?.entryFeeUSDC ?? 0n)
-                }
+                style={btnPrimary(!!account && canJoin && allowance >= (round?.entryFeeUSDC ?? 0n) && loadingTx === "")}
+                disabled={!account || !canJoin || loadingTx !== "" || !round || allowance < (round?.entryFeeUSDC ?? 0n)}
                 onClick={doJoin}
                 title={
-                  !account
-                    ? "Connect your wallet"
-                    : !canJoin
-                    ? "Join window closed or already joined"
-                    : allowance < (round?.entryFeeUSDC ?? 0n)
-                    ? "Approve USDC first"
-                    : ""
+                  !account ? "Connect your wallet"
+                  : !canJoin ? "Join window closed or already joined"
+                  : allowance < (round?.entryFeeUSDC ?? 0n) ? "Approve USDC first" : ""
                 }
               >
                 {loadingTx === "Join..." ? "Joining..." : `Join • ${entryStr}`}
               </button>
 
-              <button
-                style={btnGhost}
-                disabled={!account || loadingTx !== "" || !round}
-                onClick={doApprove}
-              >
+              <button style={btnGhost} disabled={!account || loadingTx !== "" || !round} onClick={doApprove}>
                 {loadingTx === "Approve..." ? "Approving..." : `Approve ${symbol}`}
               </button>
             </div>
@@ -599,16 +516,14 @@ export default function App() {
               <div style={{ color: THEME_MUTED }}>No draws yet.</div>
             ) : (
               <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
-                {allDrawnList.map((n) => (
-                  <Ball key={n} n={n} active={n === lastDrawn} />
-                ))}
+                {allDrawnList.map((n) => <Ball key={n} n={n} active={n === lastDrawn} />)}
               </div>
             )}
           </Card>
         </div>
 
         {/* Middle */}
-        <div style={styles.rightCol}>
+        <div style={styles.midCol}>
           <Card title="Live Board (1–90)">
             <Grid90 drawn={drawnSet} last={lastDrawn} />
           </Card>
@@ -622,25 +537,36 @@ export default function App() {
           )}
         </div>
 
-        {/* Chat column */}
+        {/* Right: Chat + Last 5 draws */}
         <div style={styles.chatCol}>
-          <ChatPanel
-            account={account}
-            roundId={currentRoundId}
-            onBindSend={(fn) => (chatSendRef.current = fn)}
-          />
+          <ChatPanel account={account} roundId={currentRoundId} />
+          <div style={{ height: 12 }} />
+          <Card title="Last 5 Draws">
+            {drawFeed.length === 0 ? (
+              <div style={{ color: THEME_MUTED }}>Waiting for draws…</div>
+            ) : (
+              <div style={{ display:"flex", flexDirection:"column", gap:8 }}>
+                {drawFeed.map((d, i) => (
+                  <div key={i} style={{display:"flex", justifyContent:"space-between", alignItems:"center"}}>
+                    <div style={{fontWeight:800, color:THEME_TEXT}}>#{d.n}</div>
+                    {d.tx ? (
+                      <a href={`${EXPLORER}/tx/${d.tx}`} target="_blank" rel="noreferrer">View tx</a>
+                    ) : (
+                      <span style={{color:THEME_MUTED}}>tx pending</span>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
+          </Card>
         </div>
       </section>
 
-      <footer style={{ margin: "40px 0", fontSize: 12, color: THEME_MUTED }}>
+      <footer style={{ margin: "32px 0", fontSize: 12, color: THEME_MUTED }}>
         Contract:{" "}
-        <a href={`${EXPLORER}/address/${CONTRACT_ADDRESS}`} target="_blank">
-          {CONTRACT_ADDRESS}
-        </a>{" "}
+        <a href={`${EXPLORER}/address/${CONTRACT_ADDRESS}`} target="_blank">{CONTRACT_ADDRESS}</a>{" "}
         · USDC:{" "}
-        <a href={`${EXPLORER}/address/${USDC_ADDRESS}`} target="_blank">
-          {USDC_ADDRESS}
-        </a>
+        <a href={`${EXPLORER}/address/${USDC_ADDRESS}`} target="_blank">{USDC_ADDRESS}</a>
       </footer>
     </div>
   );
@@ -651,51 +577,24 @@ function Header() {
   return (
     <div style={{ padding: "8px 0 0" }}>
       <div style={{display:"flex", justifyContent:"center"}}>
-        <img src="/BingoBase4.png" alt="logo" style={{ height: 96, filter:"drop-shadow(0 6px 20px rgba(0,0,0,.6))" }} />
+        <img src="/BingoBase4.png" alt="logo" style={{ height: 72, filter:"drop-shadow(0 6px 20px rgba(0,0,0,.6))" }} />
       </div>
     </div>
   );
 }
 
-function TopBar({
-  account,
-  onConnect,
-  chainId,
-}: {
-  account?: string;
-  onConnect: () => void;
-  chainId?: number;
-}) {
+function TopBar({ account, onConnect, chainId }:{ account?: string; onConnect: () => void; chainId?: number; }) {
   return (
-    <div
-      style={{
-        display: "flex",
-        justifyContent: "space-between",
-        alignItems: "center",
-        marginBottom: 12,
-      }}
-    >
+    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
       <div style={{ fontWeight: 700, color: THEME_TEXT }}>Main Hall</div>
       <div style={{ display: "flex", gap: 12, alignItems: "center" }}>
         <span style={{ fontSize: 12, color: THEME_MUTED }}>ChainId: {chainId ?? "-"}</span>
         {account ? (
-          <code
-            className="no-select"
-            style={{
-              fontSize: 12,
-              background: CHIP_BG,
-              padding: "6px 10px",
-              borderRadius: 8,
-              color: THEME_TEXT,
-              border: `1px solid ${CARD_BORDER}`,
-            }}
-          >
+          <code className="no-select" style={{ fontSize: 12, background: CHIP_BG, padding: "6px 10px", borderRadius: 8, color: THEME_TEXT, border: `1px solid ${CARD_BORDER}` }}>
             {account.slice(0, 6)}…{account.slice(-4)}
           </code>
         ) : (
-          <button style={btnPrimary(true)} onClick={onConnect}>
-            Connect Wallet
-          </button>
+          <button style={btnPrimary(true)} onClick={onConnect}>Connect Wallet</button>
         )}
       </div>
     </div>
@@ -705,14 +604,7 @@ function TopBar({
 function Card({ title, children }: { title: string; children: any }) {
   return (
     <div style={styles.card}>
-      <div
-        style={{
-          display: "flex",
-          justifyContent: "space-between",
-          alignItems: "center",
-          marginBottom: 12,
-        }}
-      >
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
         <h3 style={{ margin: 0, fontSize: 18, color: THEME_TEXT }}>{title}</h3>
       </div>
       {children}
@@ -722,15 +614,7 @@ function Card({ title, children }: { title: string; children: any }) {
 
 function Row({ label, children }: { label: string; children: any }) {
   return (
-    <div
-      style={{
-        display: "flex",
-        justifyContent: "space-between",
-        padding: "8px 0",
-        borderBottom: `1px solid ${CARD_BORDER}`,
-        color: THEME_TEXT,
-      }}
-    >
+    <div style={{ display: "flex", justifyContent: "space-between", padding: "8px 0", borderBottom: `1px solid ${CARD_BORDER}`, color: THEME_TEXT }}>
       <div style={{ color: THEME_MUTED }}>{label}</div>
       <div style={{ fontWeight: 700 }}>{children}</div>
     </div>
@@ -759,9 +643,7 @@ function Grid90({ drawn, last }: { drawn: Set<number>; last?: number }) {
               fontWeight: 700,
             }}
             title={String(n)}
-          >
-            {n}
-          </div>
+          >{n}</div>
         );
       })}
     </div>
@@ -791,9 +673,7 @@ function GridCard({ card, drawn, last }: { card: number[]; drawn: Set<number>; l
               fontSize: 16,
             }}
             title={String(n)}
-          >
-            {n}
-          </div>
+          >{n}</div>
         );
       })}
     </div>
@@ -805,29 +685,14 @@ function Ball({ n, active = false }: { n: number; active?: boolean }) {
   const bg = isLast ? ACTIVE_GREEN : DRAWN_BLUE;
   const fg = isLast ? ACTIVE_GREEN_TEXT : DRAWN_BLUE_TEXT;
   return (
-    <div
-      className="hover-grow no-select"
-      style={{
-        width: 34,
-        height: 34,
-        borderRadius: 17,
-        display: "flex",
-        alignItems: "center",
-        justifyContent: "center",
-        background: bg,
-        color: fg,
-        border: `1px solid ${CARD_BORDER}`,
-        fontWeight: 800,
-      }}
-      title={String(n)}
-    >
+    <div className="hover-grow no-select" style={{ width: 34, height: 34, borderRadius: 17, display: "flex", alignItems: "center", justifyContent: "center", background: bg, color: fg, border: `1px solid ${CARD_BORDER}`, fontWeight: 800 }} title={String(n)}>
       {n}
     </div>
   );
 }
 
 // ===== Chat Panel =====
-function ChatPanel({ account, roundId, onBindSend }:{ account?: string; roundId: number; onBindSend: (fn:(text:string)=>void)=>void }) {
+function ChatPanel({ account, roundId }:{ account?: string; roundId: number }) {
   const last4 = account ? account.slice(-4) : "anon";
   const user = `:${last4}`;
   type Msg = { id: string; from: string; text: string; ts: number };
@@ -843,17 +708,6 @@ function ChatPanel({ account, roundId, onBindSend }:{ account?: string; roundId:
     localStorage.setItem("bb_chat", JSON.stringify(msgs.slice(-300)));
     if (listRef.current) listRef.current.scrollTop = listRef.current.scrollHeight;
   }, [msgs]);
-
-  useEffect(() => {
-    const sender = (t: string) => {
-      const m: Msg = { id: crypto.randomUUID(), from: "system", text: t, ts: Date.now() };
-      setMsgs((x) => [...x, m]);
-      if (wsRef.current && wsRef.current.readyState === 1) {
-        wsRef.current.send(JSON.stringify({ type: "msg", from: "system", text: t, ts: m.ts, roundId }));
-      }
-    };
-    onBindSend(sender);
-  }, [roundId]);
 
   useEffect(() => {
     if (!CHAT_WSS) return;
@@ -894,12 +748,10 @@ function ChatPanel({ account, roundId, onBindSend }:{ account?: string; roundId:
         <div style={{ fontSize:12, color:THEME_MUTED }}>You: {user}</div>
       </div>
       <div ref={listRef} style={{height: 420, overflowY: "auto", display:"flex", flexDirection:"column", gap:8, paddingRight:4}}>
-        {msgs.length === 0 && (
-          <div style={{ color: THEME_MUTED }}>Henüz mesaj yok. İlk mesajı sen yaz.</div>
-        )}
+        {msgs.length === 0 && <div style={{ color: THEME_MUTED }}>No messages yet. Be the first!</div>}
         {msgs.map(m => (
           <div key={m.id} style={{ display:"flex", gap:8, alignItems:"flex-start"}}>
-            <div style={{width:28, height:28, borderRadius:14, background: CHIP_BG, border:`1px solid ${CARD_BORDER}`, display:"flex", alignItems:"center", justifyContent:"center", fontSize:12, color:THEME_TEXT}}>
+            <div style={{width:28, height:28, borderRadius:14, background: CHIP_BG, border:`1px solid ${CARD_BORDER}`, display:"flex", alignItems:"center", justifyContent:"center", fontSize:12, color: THEME_TEXT}}>
               {m.from.slice(-2)}
             </div>
             <div>
@@ -911,13 +763,13 @@ function ChatPanel({ account, roundId, onBindSend }:{ account?: string; roundId:
       </div>
       <div style={{display:"flex", gap:8, marginTop:12}}>
         <input
-          placeholder="Mesaj yaz..."
+          placeholder="Type a message..."
           value={text}
           onChange={(e) => setText(e.target.value)}
           onKeyDown={onKey}
           style={{flex:1, background: "#0f141b", color: THEME_TEXT, border:`1px solid ${CARD_BORDER}`, borderRadius:10, padding:"10px 12px"}}
         />
-        <button style={btnPrimary(true)} onClick={send}>Gönder</button>
+        <button style={btnPrimary(true)} onClick={send}>Send</button>
       </div>
     </div>
   );
@@ -933,15 +785,14 @@ const styles: Record<string, React.CSSProperties> = {
     background: THEME_BG,
     color: THEME_TEXT,
   },
-  hero: {
-    display: "flex",
-    alignItems: "center",
-    justifyContent: "space-between",
-    margin: "8px 0 16px",
+  columns: {
+    display: "grid",
+    gridTemplateColumns: "minmax(320px,1.05fr) minmax(420px,1.05fr) minmax(360px,0.9fr)",
+    gap: 24,
+    alignItems: "start",
   },
-  columns: { display: "grid", gridTemplateColumns: "1fr 1fr 0.9fr", gap: 24 },
   leftCol: {},
-  rightCol: {},
+  midCol: {},
   chatCol: {},
   card: {
     padding: 18,
