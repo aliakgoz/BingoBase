@@ -630,7 +630,7 @@ export default function App() {
             isolation:isolate;
           }
           .bb-banner__inner{max-width:1100px;margin:0 auto;display:grid;gap:18px;grid-template-columns:120px 1fr;align-items:center}
-          .bb-banner__logo-wrap{display:flex;align-items:center;justify-content:center}
+          .bb-banner__logo-wrap{display:flex;align-items:center;justify-content:center; margin-left:-24px;}
           .bb-banner__inner{ min-height:220px; }
           .bb-banner__logo{ height:320px; }    /* senin satırın: korunuyor */
           /* ==== LOGO: 2x büyütme + 2x hız + 2x genlik ==== */
