@@ -496,7 +496,7 @@ export default function App() {
         html, body, #root { background: ${THEME_BG}; }
         @media (max-width: 1200px) { .cols { grid-template-columns: 1fr; } }
         .hover-grow { transition: transform .14s ease, box-shadow .14s ease; }
-        .hover-grow:hover { transform: scale(3); box-shadow: 0 6px 20px rgba(0,0,0,.35); }
+        .hover-grow:hover { transform: scale(2); box-shadow: 0 6px 20px rgba(0,0,0,.35); }
         .no-select { user-select: none; }
         a{ color:#9ecbff }
       `}</style>
@@ -518,13 +518,17 @@ export default function App() {
           .bb-banner__inner{max-width:1100px;margin:0 auto;display:grid;gap:18px;grid-template-columns:120px 1fr;align-items:center}
           .bb-banner__logo-wrap{display:flex;align-items:center;justify-content:center}
           .bb-banner__inner{ min-height:220px; }
-          .bb-banner__logo{ height:320px; }    /* isteğe bağlı */
+          .bb-banner__logo{ height:320px; }    /* senin satırın: korunuyor */
+          /* ==== LOGO: 2x büyütme + 2x hız + 2x genlik ==== */
           .bb-banner__logo{
-            width:120px;height:auto;filter:drop-shadow(0 10px 30px rgba(0,0,0,.45));
-            animation: bb-pop .6s ease-out both, bb-breathe 4.5s ease-in-out infinite;
+            width:240px; /* 120px -> 240px (2x) */
+            height:auto;
+            filter:drop-shadow(0 10px 30px rgba(0,0,0,.45));
+            animation: bb-pop .6s ease-out both, bb-breathe 2.25s ease-in-out infinite; /* 4.5s -> 2.25s (2x hız) */
           }
           @keyframes bb-pop{from{transform:scale(.8);opacity:0} to{transform:scale(1);opacity:1}}
-          @keyframes bb-breathe{0%,100%{transform:translateY(0)}50%{transform:translateY(-4px)}}
+          /* Genlik 4px -> 8px (2x hareket) */
+          @keyframes bb-breathe{0%,100%{transform:translateY(0)}50%{transform:translateY(-8px)}}
 
           .bb-banner__body{display:grid;gap:14px}
           .bb-badge{
@@ -573,7 +577,7 @@ export default function App() {
           }
           @media (max-width:620px){
             .bb-banner__inner{grid-template-columns:1fr; text-align:center}
-            .bb-banner__logo{width:92px;margin:0 auto}
+            .bb-banner__logo{width:92px;margin:0 auto} /* mobil davranışı korunuyor */
             .bb-cta{justify-content:center}
             .bb-counters{justify-content:center}
           }
