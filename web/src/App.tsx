@@ -729,7 +729,7 @@ function Header() {
   return (
     <div style={{ padding: "8px 0 0" }}>
       <div style={{display:"flex", justifyContent:"center"}}>
-        <img src="/BingoBase4.png" alt="logo" style={{ height: 72, filter:"drop-shadow(0 6px 20px rgba(0,0,0,.6))" }} />
+        {/* <img src="/BingoBase4.png" alt="logo" style={{ height: 144, filter:"drop-shadow(0 6px 20px rgba(0,0,0,.6))" }} /> */}
       </div>
     </div>
   );
