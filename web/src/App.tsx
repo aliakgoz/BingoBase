@@ -13,6 +13,7 @@ const CONTRACT_ADDRESS = import.meta.env.VITE_CONTRACT_ADDRESS as string;
 const USDC_ADDRESS     = import.meta.env.VITE_USDC_ADDRESS as string;
 const RPC_URL          = (import.meta.env.VITE_RPC_URL as string) || "";
 const RPC_WSS          = (import.meta.env.VITE_RPC_WSS as string) || "";
+const CHAT_WSS         = (import.meta.env.VITE_CHAT_WSS as string) || "";
 
 // ===== THEME =====
 const THEME_BG = "#0b0f14";        // page
@@ -164,6 +165,9 @@ export default function App() {
   // drawn highlighting (only last = green)
   const [lastDrawn, setLastDrawn]           = useState<number | undefined>(undefined);
 
+  // chat sender binding (parent -> chat)
+const chatSendRef = useRef<((text: string) => void) | null>(null);
+
   // diagnostics
   const [latestBlock, setLatestBlock] = useState<number>(0);
   const [diag, setDiag] = useState<{ hasCode?: boolean; chainId?: number; msg?: string }>({});
@@ -209,7 +213,7 @@ export default function App() {
     return set;
   }, [round]);
 
-  // full drawn list (ascending) — shows ALL drawn numbers, not just last 10
+  // full drawn list (ascending)
   const allDrawnList = useMemo(
     () => Array.from(drawnSet).sort((a, b) => a - b),
     [drawnSet]
@@ -221,7 +225,6 @@ export default function App() {
       setBingo(new Contract(CONTRACT_ADDRESS, BINGO_ABI, read));
       console.log(`[frontend] bingo read via ${readProviderName}`);
     }
-    // Events should prefer WSS; if not present, we still fall back to HTTP polling
     if (readWs && CONTRACT_ADDRESS) {
       setEvents(new Contract(CONTRACT_ADDRESS, BINGO_ABI, readWs));
       console.log("[frontend] event subscription bound to WSS");
@@ -234,7 +237,7 @@ export default function App() {
     }
   }, [read, readWs, readProviderName]);
 
-  // track latest block for “live” indicator
+  // track latest block
   useEffect(() => {
     if (!read) return;
     let stop = false;
@@ -248,14 +251,10 @@ export default function App() {
     };
     tick();
 
-    // if WSS: also listen on 'block' (faster)
     if (readWs) {
       const onBlock = (b: number) => setLatestBlock(b);
       readWs.on("block", onBlock);
-      return () => {
-        stop = true;
-        readWs.off("block", onBlock);
-      };
+      return () => { stop = true; readWs.off("block", onBlock); };
     }
     return () => { stop = true; };
   }, [read, readWs]);
@@ -292,9 +291,9 @@ export default function App() {
       if (ridN > 0) {
         const r = (await bingo.roundInfo(rid)) as unknown as RoundInfo;
         setRound(r);
-        // if we don't have a lastDrawn yet, infer as the highest drawIndex we have events for later (fallback: max n)
         if (lastDrawn === undefined && r.drawnMask !== 0n) {
-          const list = Array.from({ length: MAX_NUMBER }, (_, i) => i + 1).filter(n => ((r.drawnMask & (1n << BigInt(n-1))) !== 0n));
+          const list = Array.from({ length: MAX_NUMBER }, (_, i) => i + 1)
+            .filter(n => ((r.drawnMask & (1n << BigInt(n-1))) !== 0n));
           if (list.length) setLastDrawn(list[list.length - 1]); // naive fallback
         }
       } else {
@@ -334,10 +333,8 @@ export default function App() {
               setCardRoundId(ridN);
             }
           }
-          // IMPORTANT: do not setHasCard(false) here; we keep the last good card for this round
         } catch (e) {
           console.warn("Game state read error:", e);
-          // Do not toggle hasCard on transient errors to avoid flicker
         }
       }
     } catch (e) {
@@ -347,7 +344,7 @@ export default function App() {
     }
   };
 
-  // polling loop (always on; events will force extra pulls)
+  // polling loop
   useEffect(() => {
     let t: number;
     const loop = async () => {
@@ -362,26 +359,34 @@ export default function App() {
   useEffect(() => {
     if (!events) return;
 
-    const onDraw = async (_roundId: any, number: number) => {
-      setLastDrawn(Number(number));
+    const onDraw = async (_roundId: any, number: number, _idx: number, ev: any) => {
+      const n = Number(number);
+      setLastDrawn(n);
+      // announce into chat with tx link
+      try {
+        const txHash: string | undefined = ev?.log?.transactionHash || ev?.transactionHash;
+        const url = `${explorerBase(chainId)}/tx/${txHash ?? ""}`;
+        const msg = `Son çekiliş: ${n}${txHash ? ` • tx: ${url}` : ""}`;
+        chatSendRef.current?.(msg);
+      } catch {}
       await pullOnce();
     };
     const onAny = async (..._args: any[]) => { await pullOnce(); };
 
-    events.on("Draw", onDraw);
-    events.on("VRFFulfilled", onAny);
-    events.on("RoundCreated", onAny);
-    events.on("Payout", onAny);
+    (events as any).on("Draw", onDraw);
+    (events as any).on("VRFFulfilled", onAny);
+    (events as any).on("RoundCreated", onAny);
+    (events as any).on("Payout", onAny);
 
     console.log("[frontend] subscribed to Draw/VRFFulfilled/RoundCreated/Payout");
 
     return () => {
-      events.off("Draw", onDraw);
-      events.off("VRFFulfilled", onAny);
-      events.off("RoundCreated", onAny);
-      events.off("Payout", onAny);
+      (events as any).off("Draw", onDraw);
+      (events as any).off("VRFFulfilled", onAny);
+      (events as any).off("RoundCreated", onAny);
+      (events as any).off("Payout", onAny);
     };
-  }, [events]);
+  }, [events, chainId]);
 
   // helpers
   const withSigner = async (c: Contract) => {
@@ -467,11 +472,11 @@ export default function App() {
 
   return (
     <div style={styles.wrap}>
-      {/* Global styles for responsiveness & hover */}
+      {/* Global styles */}
       <style>{`
         :root { color-scheme: dark; }
         html, body, #root { background: ${THEME_BG}; }
-        @media (max-width: 960px) { .cols { grid-template-columns: 1fr; } }
+        @media (max-width: 1200px) { .cols { grid-template-columns: 1fr; } }
         .hover-grow { transition: transform .14s ease, box-shadow .14s ease; }
         .hover-grow:hover { transform: scale(1.24); box-shadow: 0 6px 20px rgba(0,0,0,.35); }
         .no-select { user-select: none; }
@@ -593,7 +598,7 @@ export default function App() {
           </Card>
         </div>
 
-        {/* Right */}
+        {/* Middle */}
         <div style={styles.rightCol}>
           <Card title="Live Board (1–90)">
             <Grid90 drawn={drawnSet} last={lastDrawn} />
@@ -607,6 +612,15 @@ export default function App() {
               </div>
             </Card>
           )}
+        </div>
+
+        {/* Chat column */}
+        <div style={styles.chatCol}>
+          <ChatPanel
+            account={account}
+            roundId={currentRoundId}
+            onBindSend={(fn) => (chatSendRef.current = fn)}
+          />
         </div>
       </section>
 
@@ -810,10 +824,110 @@ function Ball({ n, active = false }: { n: number; active?: boolean }) {
   );
 }
 
+// ===== Chat Panel =====
+function ChatPanel({ account, roundId, onBindSend }:{ account?: string; roundId: number; onBindSend: (fn:(text:string)=>void)=>void }) {
+  const last4 = account ? account.slice(-4) : "anon";
+  const user = `:${last4}`;
+  type Msg = { id: string; from: string; text: string; ts: number };
+  const [msgs, setMsgs] = useState<Msg[]>(() => {
+    const raw = localStorage.getItem("bb_chat");
+    return raw ? JSON.parse(raw) : [];
+  });
+  const [text, setText] = useState("");
+  const wsRef = useRef<WebSocket | null>(null);
+  const listRef = useRef<HTMLDivElement | null>(null);
+
+  // persist + autoscroll
+  useEffect(() => {
+    localStorage.setItem("bb_chat", JSON.stringify(msgs.slice(-300)));
+    if (listRef.current) listRef.current.scrollTop = listRef.current.scrollHeight;
+  }, [msgs]);
+
+  // bind sender for parent announcements
+  useEffect(() => {
+    const sender = (t: string) => {
+      const m: Msg = { id: crypto.randomUUID(), from: "system", text: t, ts: Date.now() };
+      setMsgs((x) => [...x, m]);
+      if (wsRef.current && wsRef.current.readyState === 1) {
+        wsRef.current.send(JSON.stringify({ type: "msg", from: "system", text: t, ts: m.ts, roundId }));
+      }
+    };
+    onBindSend(sender);
+  }, [roundId]);
+
+  // websocket connect (if configured)
+  useEffect(() => {
+    if (!CHAT_WSS) return; // local-only chat fallback
+    try {
+      const ws = new WebSocket(CHAT_WSS);
+      wsRef.current = ws;
+      ws.onopen = () => { ws.send(JSON.stringify({ type: "join", from: user, roundId })); };
+      ws.onmessage = (ev) => {
+        try {
+          const data = JSON.parse(ev.data);
+          if (data?.type === "msg") {
+            const m: Msg = { id: crypto.randomUUID(), from: data.from || ":anon", text: data.text, ts: data.ts || Date.now() };
+            setMsgs((x) => [...x, m]);
+          }
+        } catch {}
+      };
+      ws.onclose = () => { wsRef.current = null; };
+      return () => { ws.close(); };
+    } catch {}
+  }, [roundId, account]);
+
+  const send = () => {
+    const trimmed = text.trim();
+    if (!trimmed) return;
+    const m: Msg = { id: crypto.randomUUID(), from: user, text: trimmed, ts: Date.now() };
+    setMsgs((x) => [...x, m]);
+    setText("");
+    if (wsRef.current && wsRef.current.readyState === 1) {
+      wsRef.current.send(JSON.stringify({ type: "msg", from: user, text: trimmed, ts: m.ts, roundId }));
+    }
+  };
+  const onKey = (e: React.KeyboardEvent<HTMLInputElement>) => { if (e.key === "Enter") send(); };
+
+  return (
+    <div style={styles.card}>
+      <div style={{display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:12}}>
+        <h3 style={{ margin: 0, fontSize: 18, color: THEME_TEXT }}>Chat</h3>
+        <div style={{ fontSize:12, color:THEME_MUTED }}>You: {user}</div>
+      </div>
+      <div ref={listRef} style={{height: 420, overflowY: "auto", display:"flex", flexDirection:"column", gap:8, paddingRight:4}}>
+        {msgs.length === 0 && (
+          <div style={{ color: THEME_MUTED }}>Henüz mesaj yok. İlk mesajı sen yaz.</div>
+        )}
+        {msgs.map(m => (
+          <div key={m.id} style={{ display:"flex", gap:8, alignItems:"flex-start"}}>
+            <div style={{width:28, height:28, borderRadius:14, background: CHIP_BG, border:`1px solid ${CARD_BORDER}`, display:"flex", alignItems:"center", justifyContent:"center", fontSize:12, color:THEME_TEXT}}>
+              {m.from.slice(-2)}
+            </div>
+            <div>
+              <div style={{fontSize:12, color: THEME_MUTED}}>{m.from} • {new Date(m.ts).toLocaleTimeString()}</div>
+              <div style={{fontWeight:600, color: THEME_TEXT}}>{m.text}</div>
+            </div>
+          </div>
+        ))}
+      </div>
+      <div style={{display:"flex", gap:8, marginTop:12}}>
+        <input
+          placeholder="Mesaj yaz..."
+          value={text}
+          onChange={(e) => setText(e.target.value)}
+          onKeyDown={onKey}
+          style={{flex:1, background: "#0f141b", color: THEME_TEXT, border:`1px solid ${CARD_BORDER}`, borderRadius:10, padding:"10px 12px"}}
+        />
+        <button style={btnPrimary(true)} onClick={send}>Gönder</button>
+      </div>
+    </div>
+  );
+}
+
 // ===== Styles =====
 const styles: Record<string, React.CSSProperties> = {
   wrap: {
-    maxWidth: 1320,
+    maxWidth: 1480,
     margin: "24px auto",
     padding: "0 24px",
     fontFamily: "Inter, system-ui, Arial",
@@ -826,9 +940,10 @@ const styles: Record<string, React.CSSProperties> = {
     justifyContent: "space-between",
     margin: "8px 0 16px",
   },
-  columns: { display: "grid", gridTemplateColumns: "1fr 1.2fr", gap: 24 },
+  columns: { display: "grid", gridTemplateColumns: "1fr 1fr 0.9fr", gap: 24 },
   leftCol: {},
   rightCol: {},
+  chatCol: {},
   card: {
     padding: 18,
     border: `1px solid ${CARD_BORDER}`,
