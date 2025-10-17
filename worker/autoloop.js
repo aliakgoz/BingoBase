@@ -1,236 +1,167 @@
-// autoloop.js — Node 18+, Ethers v6 (auto-claim-for + rolling rounds)
+// autoloop.js — fault-tolerant + resumable Base Bingo loop
 import 'dotenv/config';
 import { Contract, JsonRpcProvider, Wallet } from 'ethers';
-import fs from 'node:fs';
-import path from 'node:path';
+import fs from 'fs';
+import path from 'path';
 
+// ==== CONFIG ====
 const RPC       = process.env.RPC_URL;
 const PK        = process.env.SYSTEM_PK;
 const CONTRACT  = process.env.CONTRACT;
+const STATEFILE = path.join(process.cwd(), 'state.json');
 
-const MAX_NUMBER = 90;
-const DEFAULT_JOIN_WINDOW_SEC = 240;  // 2 minutes
-const DEFAULT_DRAW_INTERVAL   = 5;    // 1 second
-const POLL_MS                 = 3000;
-const AFTER_90_COOLDOWN_MS    = 3000;
+const MAX_NUMBER             = 90;
+const DEFAULT_DRAW_INTERVAL  = 5;
+const POLL_MS                = 3000;
+const RPC_TIMEOUT_MS         = 20_000;
+const WAIT_TX_TIMEOUT_MS     = 60_000;
+const WATCHDOG_MS            = 45_000;
 
 if (!RPC || !PK || !CONTRACT) {
-  console.error('Missing env. Required: RPC_URL, SYSTEM_PK, CONTRACT');
+  console.error("Missing env vars: RPC_URL, SYSTEM_PK, CONTRACT");
   process.exit(1);
 }
 
 const abiPath = path.join(process.cwd(), 'BaseBingo25.abi.json');
-if (!fs.existsSync(abiPath)) {
-  console.error(`ABI not found at ${abiPath}`);
-  process.exit(1);
-}
 const bingoAbi = JSON.parse(fs.readFileSync(abiPath, 'utf8'));
-
 const provider = new JsonRpcProvider(RPC);
-const signer   = new Wallet(PK, provider);
-const bingo    = new Contract(CONTRACT, bingoAbi, signer);
+const signer = new Wallet(PK, provider);
+const bingo = new Contract(CONTRACT, bingoAbi, signer);
 
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
-async function retry(fn, tries = 5, baseMs = 600) {
-  let lastErr;
+function withTimeout(promise, ms, label) {
+  let t;
+  const timeout = new Promise((_, rej) => t = setTimeout(() => rej(new Error(`[timeout] ${label}`)), ms));
+  return Promise.race([promise.finally(() => clearTimeout(t)), timeout]);
+}
+
+async function retry(fn, tries = 5, label = "op") {
+  let err;
   for (let i = 0; i < tries; i++) {
-    try { return await fn(); }
+    try { return await withTimeout(fn(), RPC_TIMEOUT_MS, label); }
     catch (e) {
-      lastErr = e;
-      const wait = baseMs * Math.pow(2, i);
-      console.warn(`[retry ${i+1}/${tries}] ${e?.shortMessage ?? e?.message ?? e} — waiting ${wait}ms`);
+      err = e;
+      const wait = 600 * 2 ** i;
+      console.warn(`[retry ${i + 1}/${tries}] ${e.message} — wait ${wait}ms`);
       await sleep(wait);
     }
   }
-  throw lastErr;
+  throw err;
 }
 
-async function startupChecks() {
-  const net = await retry(() => provider.getNetwork());
-  console.log(`[startup] chainId=${Number(net.chainId)} (hex: 0x${Number(net.chainId).toString(16)})`);
-  console.log(`[startup] CONTRACT=${CONTRACT}`);
-  const code = await retry(() => provider.getCode(CONTRACT));
-  if (!code || code === '0x') throw new Error(`No bytecode at ${CONTRACT} on this chain.`);
-}
-
-async function createNextRound(entryFee) {
-  const now = Math.floor(Date.now() / 1000);
-  const tx = await retry(() => bingo.createRound(
-    BigInt(now + 10),
-    BigInt(DEFAULT_JOIN_WINDOW_SEC),
-    BigInt(DEFAULT_DRAW_INTERVAL),
-    entryFee
-  ));
-  await tx.wait();
-  console.log(`[next] Round created for t=${now + 10}`);
-}
-
-async function ensureNextRoundExists() {
-  const rid = Number(await retry(() => bingo.currentRoundId()));
-  if (rid === 0) {
-    console.log('[init] No rounds. Creating first one...');
-    await createNextRound(1_000_000n); // 1 USDC
+async function waitMined(hash) {
+  try {
+    const rcpt = await provider.waitForTransaction(hash, 1, WAIT_TX_TIMEOUT_MS);
+    if (rcpt && rcpt.status !== 0) return rcpt;
+  } catch (e) {
+    if (!/timeout/i.test(e.message)) throw e;
   }
+  const rcpt2 = await retry(() => provider.getTransactionReceipt(hash), 2, "getTxRcpt");
+  if (rcpt2 && rcpt2.status !== 0) return rcpt2;
+  throw new Error("tx not mined");
 }
 
-function parseRound(info) {
+function parseRoundInfo(info) {
   return {
-    startTime:    Number(info[0]),
+    startTime: Number(info[0]),
     joinDeadline: Number(info[1]),
     drawInterval: Number(info[2]),
-    entryFee:     info[3],
+    entryFee: info[3],
     vrfRequested: Boolean(info[4]),
-    randomness:   BigInt(info[5]),
-    drawnMask:    info[6],
-    drawCount:    Number(info[7]),
+    randomness: BigInt(info[5]),
+    drawnMask: info[6],
+    drawCount: Number(info[7]),
     lastDrawTime: Number(info[8]),
-    finalized:    Boolean(info[9]),
-    winner:       String(info[10]),
-    prizePool:    info[11],
+    finalized: Boolean(info[9]),
+    winner: String(info[10]),
+    prizePool: info[11],
   };
 }
 
-async function tryAutoClaim(rid) {
-  const players = await retry(() => bingo.playersOf(rid));
-  if (!players || players.length === 0) return false;
+let lastProgressAt = Date.now();
+let state = { lastRound: 0, lastDraw: 0 };
 
-  for (const p of players) {
-    const ok = await retry(() => bingo.canClaimBingo(rid, p));
-    if (ok) {
-      console.log(`[claim] Auto-claiming for ${p} in round ${rid}...`);
-      try {
-        const tx = await retry(() => bingo.claimBingoFor(rid, p));
-        await tx.wait();
-        console.log(`[claim] Success for ${p} (round ${rid})`);
-        return true; // finalized; stop checking others
-      } catch (e) {
-        // If another tx just finalized, this will revert; we just ignore and continue
-        console.warn(`[claim] claimBingoFor failed (maybe already claimed):`, e?.shortMessage ?? e?.message ?? e);
-      }
-    }
-  }
-  return false;
+function saveState() {
+  fs.writeFileSync(STATEFILE, JSON.stringify(state, null, 2));
 }
 
-async function resumeIfNeeded() {
-  const rid  = Number(await retry(() => bingo.currentRoundId()));
-  const info = parseRound(await retry(() => bingo.roundInfo(rid)));
-  const now  = Math.floor(Date.now() / 1000);
+function loadState() {
+  if (fs.existsSync(STATEFILE)) {
+    try { state = JSON.parse(fs.readFileSync(STATEFILE)); }
+    catch { /* ignore */ }
+  }
+}
+
+async function safeDraw(rid, count, interval) {
+  console.log(`[loop] Draw (${count}/${MAX_NUMBER}) for ${rid}`);
+  const tx = await retry(() => bingo.drawNext(rid), 5, "drawNext");
+  await waitMined(tx.hash).catch(e => console.warn(`[waitTx] ${e.message}`));
+  state.lastDraw = count;
+  state.lastRound = rid;
+  saveState();
+  await sleep(Math.max(1000, (interval || DEFAULT_DRAW_INTERVAL) * 1000));
+}
+
+async function mainLoop() {
+  const rid = Number(await retry(() => bingo.currentRoundId(), 3, "currentRoundId"));
+  const info = parseRoundInfo(await retry(() => bingo.roundInfo(rid), 3, "roundInfo"));
+  if (info.drawCount !== state.lastDraw || rid !== state.lastRound) {
+    lastProgressAt = Date.now();
+    state.lastDraw = info.drawCount;
+    state.lastRound = rid;
+    saveState();
+  }
 
   if (info.finalized) {
-    console.log(`[resume] Round ${rid} finalized. Spawning next...`);
-    await createNextRound(info.entryFee);
+    console.log(`[loop] Round ${rid} finalized`);
+    await sleep(POLL_MS);
     return;
   }
 
-  if (!info.vrfRequested && now > info.joinDeadline) {
-    console.log(`[resume] Join closed for ${rid}. Requesting VRF...`);
-    const tx = await retry(() => bingo.requestRandomness(rid));
-    await tx.wait();
+  if (!info.vrfRequested && Date.now()/1000 > info.joinDeadline) {
+    console.log(`[loop] Request VRF for ${rid}`);
+    const tx = await retry(() => bingo.requestRandomness(rid), 5, "requestRandomness");
+    await waitMined(tx.hash).catch(e => console.warn(`[waitTx VRF] ${e.message}`));
+    return;
   }
 
-  if (info.randomness !== 0n && info.drawCount > 0) {
-    await tryAutoClaim(rid);
+  if (info.randomness !== 0n && info.drawCount < MAX_NUMBER) {
+    const nextDraw = info.drawCount + 1;
+    if (nextDraw > state.lastDraw) await safeDraw(rid, nextDraw, info.drawInterval);
   }
 
-  if (info.randomness !== 0n && info.drawCount >= MAX_NUMBER && !info.finalized) {
-    console.log(`[resume] 90/90 reached without finalize. Creating next...`);
-    await sleep(AFTER_90_COOLDOWN_MS);
-    await createNextRound(info.entryFee);
-  }
+  await sleep(POLL_MS);
 }
 
-function attachEventLogs() {
-  bingo.on('RoundCreated', (roundId, startTime, entryFeeUSDC) => {
-    console.log(`[event] RoundCreated id=${roundId} start=${startTime} entry=${entryFeeUSDC}`);
-  });
-
-  bingo.on('VRFFulfilled', (roundId) => {
-    console.log(`[event] VRFFulfilled round=${Number(roundId)}`);
-  });
-
-  bingo.on('Draw', async (roundId) => {
-    const rid = Number(roundId);
-    console.log(`[event] Draw round=${rid}`);
-    try {
-      await tryAutoClaim(rid);
-    } catch (e) {
-      console.warn(`[event] auto-claim error:`, e?.shortMessage ?? e?.message ?? e);
-    }
-  });
-
-  bingo.on('Payout', async (roundId, winner, winnerUSDC, feeUSDC) => {
-    const rid = Number(roundId);
-    console.log(`[event] Payout round=${rid} winner=${winner} win=${winnerUSDC} fee=${feeUSDC}`);
-    try {
-      const info = parseRound(await retry(() => bingo.roundInfo(rid)));
-      await createNextRound(info.entryFee);
-    } catch (e) {
-      console.error('[event:Payout] error:', e?.shortMessage ?? e?.message ?? e);
-    }
-  });
+function attachEvents() {
+  for (const e of ["VRFFulfilled", "Draw", "Payout", "RoundCreated"])
+    bingo.on(e, (r) => { console.log(`[event] ${e} ${Number(r)}`); lastProgressAt = Date.now(); });
 }
 
-async function loop() {
-  await startupChecks();
-  await ensureNextRoundExists();
-  await resumeIfNeeded();
-  attachEventLogs();
+async function run() {
+  loadState();
+  attachEvents();
+  const net = await provider.getNetwork();
+  console.log(`[start] chainId=${Number(net.chainId)} contract=${CONTRACT}`);
+  setInterval(async () => {
+    const idle = Date.now() - lastProgressAt;
+    if (idle > WATCHDOG_MS) {
+      console.warn(`[watchdog] stalled ${idle/1000}s, checking state...`);
+      try {
+        const rid = Number(await bingo.currentRoundId());
+        const info = parseRoundInfo(await bingo.roundInfo(rid));
+        if (info.randomness !== 0n && info.drawCount < MAX_NUMBER)
+          await safeDraw(rid, info.drawCount + 1, info.drawInterval);
+        lastProgressAt = Date.now();
+      } catch (e) { console.error(`[watchdog] ${e.message}`); }
+    }
+  }, 15_000);
 
   while (true) {
-    try {
-      const rid  = Number(await retry(() => bingo.currentRoundId()));
-      const info = parseRound(await retry(() => bingo.roundInfo(rid)));
-      const now  = Math.floor(Date.now() / 1000);
-
-      if (info.finalized) {
-        console.log(`[loop] Round ${rid} finalized → next`);
-        await createNextRound(info.entryFee);
-        await sleep(3000);
-        continue;
-      }
-
-      if (now < info.startTime) {
-        await sleep(1000);
-        continue;
-      }
-
-      if (!info.vrfRequested && now > info.joinDeadline) {
-        console.log(`[loop] Join closed for ${rid} → request VRF`);
-        const tx = await retry(() => bingo.requestRandomness(rid));
-        await tx.wait();
-        await sleep(2000);
-        continue;
-      }
-
-      if (info.randomness !== 0n && info.drawCount < MAX_NUMBER) {
-        console.log(`[loop] Draw (${info.drawCount + 1}/${MAX_NUMBER}) for ${rid}`);
-        const tx = await retry(() => bingo.drawNext(rid));
-        await tx.wait();
-        // after each draw, try auto-claim
-        await tryAutoClaim(rid);
-        await sleep(Math.max(1000, info.drawInterval * 1000));
-        continue;
-      }
-
-      if (info.randomness !== 0n && info.drawCount >= MAX_NUMBER && !info.finalized) {
-        console.log(`[loop] 90/90 reached without finalize → next round`);
-        await sleep(AFTER_90_COOLDOWN_MS);
-        await createNextRound(info.entryFee);
-        await sleep(3000);
-        continue;
-      }
-
-      await sleep(POLL_MS);
-    } catch (e) {
-      console.error('[loop] error:', e?.shortMessage ?? e?.message ?? e);
-      await sleep(4000);
-    }
+    try { await mainLoop(); }
+    catch (e) { console.error(`[loop] ${e.message}`); await sleep(3000); }
   }
 }
 
-loop().catch((e) => {
-  console.error(e);
-  process.exit(1);
-});
+run();
