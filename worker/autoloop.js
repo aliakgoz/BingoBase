@@ -1,6 +1,6 @@
 // autoloop.js — Base Mainnet • Node 18+ • Ethers v6
 import 'dotenv/config';
-import { Contract, JsonRpcProvider, Wallet, NonceManager, parseUnits } from 'ethers';
+import { Contract, JsonRpcProvider, Wallet } from 'ethers';
 import fs from 'node:fs';
 import path from 'node:path';
 
@@ -13,11 +13,12 @@ const MAX_NUMBER = 90;
 const DEFAULT_JOIN_WINDOW_SEC = 240; // 2 dk
 const DEFAULT_DRAW_INTERVAL   = 5;   // sn (kontrakt zaten enforce ediyor)
 const POLL_MS                 = 1500;
-const TX_TIMEOUT_MS           = 45_000; // 45s içinde mining olmazsa replace
-const FEE_BUMP_FACTOR_NUM     = 120;    // %20 bump
-const FEE_BUMP_FACTOR_DEN     = 100;
 
-// ===== ABI (json import uyarısından kaçın) =====
+const TX_TIMEOUT_MS           = 20_000; // replacement için kısa tut
+const FEE_BUMP_NUM            = 130n;   // %30
+const FEE_BUMP_DEN            = 100n;
+
+// ===== ABI =====
 const abiPath = path.join(process.cwd(), 'BaseBingo25.abi.json');
 if (!fs.existsSync(abiPath)) {
   console.error(`ABI not found at ${abiPath}`);
@@ -31,49 +32,33 @@ if (!RPC || !PK || !CONTRACT) {
   process.exit(1);
 }
 const provider = new JsonRpcProvider(RPC);
-const wallet   = new Wallet(PK, provider);
-const signer   = new NonceManager(wallet); // nonce güvenliği
+const signer   = new Wallet(PK, provider);
 const bingo    = new Contract(CONTRACT, bingoAbi, signer);
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-
-async function retry(fn, tries = 5, baseMs = 600) {
-  let lastErr;
-  for (let i = 0; i < tries; i++) {
-    try { return await fn(); }
-    catch (e) {
-      lastErr = e;
-      const wait = baseMs * Math.pow(2, i);
-      console.warn(`${ts()}: [retry ${i+1}/${tries}] ${msg(e)} — wait ${wait}ms`);
-      await sleep(wait);
-    }
-  }
-  throw lastErr;
-}
-
-function ts() { return new Date().toISOString(); }
-function msg(e){ return e?.shortMessage ?? e?.message ?? String(e); }
+const ts = () => new Date().toISOString();
+const msg = (e) => e?.shortMessage ?? e?.message ?? String(e);
 
 async function waitProviderHealthy() {
-  const net = await retry(() => provider.getNetwork());
+  const net = await provider.getNetwork();
   console.log(`${ts()}: [startup] chainId=${Number(net.chainId)} (hex: 0x${Number(net.chainId).toString(16)})`);
   if (Number(net.chainId) !== 8453) {
     throw new Error(`Wrong network. Expected Base mainnet (8453). Got ${Number(net.chainId)}.`);
   }
   console.log(`${ts()}: [startup] CONTRACT=${CONTRACT}`);
-  const code = await retry(() => provider.getCode(CONTRACT));
+  const code = await provider.getCode(CONTRACT);
   if (!code || code === '0x') throw new Error(`No bytecode at ${CONTRACT}`);
 }
 
 // ---- Fee helpers (EIP-1559) ----
-const MIN_PRIORITY = 100_000n;   // 0.1 gwei (Base genelde çok düşük; taban koy)
-const MIN_FEE      = 500_000n;   // 0.5 gwei maxFee tabanı
+const MIN_PRIORITY = 100_000n;   // 0.1 gwei
+const MIN_FEE      = 500_000n;   // 0.5 gwei
 
-function bump(num) {
-  return (num * BigInt(FEE_BUMP_FACTOR_NUM)) / BigInt(FEE_BUMP_FACTOR_DEN);
+function bump(n) {
+  return (n * FEE_BUMP_NUM) / FEE_BUMP_DEN;
 }
 
-async function getInitialFees() {
+async function getSafeFees() {
   const fd = await provider.getFeeData();
   let maxPriorityFeePerGas = fd.maxPriorityFeePerGas ?? MIN_PRIORITY;
   let maxFeePerGas         = fd.maxFeePerGas ?? MIN_FEE;
@@ -81,7 +66,6 @@ async function getInitialFees() {
   if (maxPriorityFeePerGas < MIN_PRIORITY) maxPriorityFeePerGas = MIN_PRIORITY;
   if (maxFeePerGas < MIN_FEE) maxFeePerGas = MIN_FEE;
 
-  // güvenli marj: maxFee >= baseFee*2 + priority
   const block = await provider.getBlock('latest');
   const base  = (block?.baseFeePerGas ?? 0n);
   const safe  = base * 2n + maxPriorityFeePerGas;
@@ -90,91 +74,119 @@ async function getInitialFees() {
   return { maxPriorityFeePerGas, maxFeePerGas };
 }
 
-// Replaceable tx gönder – timeout’ta/underpriced’te gazı artırıp aynı nonce ile tekrar dener
-async function sendReplaceable(sendFn, label) {
-  let { maxPriorityFeePerGas, maxFeePerGas } = await getInitialFees();
-  let attempts = 0;
-  while (attempts < 6) {
-    attempts++;
+// ====== REPLACEABLE TX (AYNI NONCE) ======
+// nonceKey -> aktif nonce & current fees
+const pendingSlots = new Map();
+/**
+ * sendReplaceableStrict:
+ *  - Aynı nonce ile replace eder (gerçek replacement)
+ *  - Timeout/underpriced'ta fee bump ve tekrar
+ *  - NONCE_EXPIRED ise zinciri üst katman kontrol eder
+ */
+async function sendReplaceableStrict(label, buildTx, nonceKey = label) {
+  // slot al / oluştur
+  let slot = pendingSlots.get(nonceKey);
+  if (!slot) {
+    const startNonce = await provider.getTransactionCount(await signer.getAddress(), 'pending');
+    const fees = await getSafeFees();
+    slot = {
+      nonce: startNonce,
+      maxPriorityFeePerGas: fees.maxPriorityFeePerGas,
+      maxFeePerGas: fees.maxFeePerGas,
+    };
+    pendingSlots.set(nonceKey, slot);
+  }
+
+  for (let attempt = 1; attempt <= 12; attempt++) {
     try {
-      const tx = await sendFn({ maxPriorityFeePerGas, maxFeePerGas });
-      console.log(`${ts()}: [loop] ${label} tx=${tx.hash}`);
+      const txReq = await buildTx({
+        nonce: slot.nonce,
+        maxPriorityFeePerGas: slot.maxPriorityFeePerGas,
+        maxFeePerGas: slot.maxFeePerGas,
+      });
+      const tx = await signer.sendTransaction(txReq);
+      console.log(`${ts()}: [loop] ${label} tx=${tx.hash} nonce=${slot.nonce} p=${slot.maxPriorityFeePerGas} f=${slot.maxFeePerGas}`);
+
       const rc = await provider.waitForTransaction(tx.hash, 1, TX_TIMEOUT_MS);
       if (!rc) {
-        console.warn(`${ts()}: [waitTx] tx not mined`);
-        // replace aynı nonce: NonceManager zaten aynı nonce’ı kullanır; sadece fee’yi arttır.
-        maxPriorityFeePerGas = bump(maxPriorityFeePerGas);
-        maxFeePerGas         = bump(maxFeePerGas);
+        console.warn(`${ts()}: [sendReplaceable] timeout`);
+        // fee bump ve tekrar (aynı nonce)
+        slot.maxPriorityFeePerGas = bump(slot.maxPriorityFeePerGas);
+        slot.maxFeePerGas         = bump(slot.maxFeePerGas);
         continue;
       }
       if (rc.status !== 1) throw new Error(`${label} reverted`);
+      // başarı → slot’ı bırak
+      pendingSlots.delete(nonceKey);
       return rc;
     } catch (e) {
       const m = msg(e);
-      if (m.includes('REPLACEMENT_UNDERPRICED') || m.includes('underpriced')) {
-        // daha agresif artış
-        maxPriorityFeePerGas = bump(maxPriorityFeePerGas);
-        maxFeePerGas         = bump(maxFeePerGas);
+      if (m.includes('replacement transaction underpriced') || m.includes('UNDERPRICED')) {
+        slot.maxPriorityFeePerGas = bump(slot.maxPriorityFeePerGas);
+        slot.maxFeePerGas         = bump(slot.maxFeePerGas);
         console.warn(`${ts()}: [replace] underpriced → bump & retry`);
         continue;
       }
-      if (m.includes('NONCE_EXPIRED') || m.includes('nonce too low')) {
-        // zincirde zaten işlenmiş olabilir; ileri bakıp durumu teyit et
-        console.warn(`${ts()}: [nonce] expired → state check`);
-        return null; // üst katman state’e bakıp karar versin
+      if (m.includes('nonce too low') || m.includes('NONCE_EXPIRED')) {
+        // Önceki tx muhtemelen zincirde. Slotu bırak; üst katman zinciri kontrol etsin.
+        console.warn(`${ts()}: [nonce] expired/low → state check`);
+        pendingSlots.delete(nonceKey);
+        return null;
       }
-      if (m.includes('intrinsic transaction cost') || m.includes('insufficient funds')) {
+      if (m.includes('insufficient funds') || m.includes('intrinsic transaction cost')) {
         console.error(`${ts()}: [funds] ${m}`);
+        pendingSlots.delete(nonceKey);
         throw e;
       }
-      console.warn(`${ts()}: [sendReplaceable] ${m}`);
-      // genel durumda da bir bump dene
-      maxPriorityFeePerGas = bump(maxPriorityFeePerGas);
-      maxFeePerGas         = bump(maxFeePerGas);
+      console.warn(`${ts()}: [sendReplaceable] ${m} → bump & retry`);
+      slot.maxPriorityFeePerGas = bump(slot.maxPriorityFeePerGas);
+      slot.maxFeePerGas         = bump(slot.maxFeePerGas);
     }
   }
-  throw new Error(`${label} failed after multiple replacements`);
+  pendingSlots.delete(nonceKey);
+  throw new Error(`${label} failed after many replacements`);
 }
 
 // ---- Game utils ----
-function parseRoundInfo(info) {
+function parseRoundInfo(i) {
   return {
-    startTime:    Number(info[0]),
-    joinDeadline: Number(info[1]),
-    drawInterval: Number(info[2]),
-    entryFee:     info[3],
-    vrfRequested: Boolean(info[4]),
-    randomness:   BigInt(info[5]),
-    drawnMask:    info[6],
-    drawCount:    Number(info[7]),
-    lastDrawTime: Number(info[8]),
-    finalized:    Boolean(info[9]),
-    winner:       String(info[10]),
-    prizePool:    info[11],
+    startTime:    Number(i[0]),
+    joinDeadline: Number(i[1]),
+    drawInterval: Number(i[2]),
+    entryFee:     i[3],
+    vrfRequested: Boolean(i[4]),
+    randomness:   BigInt(i[5]),
+    drawnMask:    i[6],
+    drawCount:    Number(i[7]),
+    lastDrawTime: Number(i[8]),
+    finalized:    Boolean(i[9]),
+    winner:       String(i[10]),
+    prizePool:    i[11],
   };
 }
 
 async function createNextRound(entryFee) {
   const now = Math.floor(Date.now() / 1000);
-  await sendReplaceable(
-    (ov) => bingo.createRound(BigInt(now + 10), BigInt(DEFAULT_JOIN_WINDOW_SEC), BigInt(DEFAULT_DRAW_INTERVAL), entryFee, ov),
-    `CreateNext(start=${now+10})`
+  await sendReplaceableStrict(
+    `CreateNext(start=${now+10})`,
+    (ov) => bingo.createRound.populateTransaction(BigInt(now + 10), BigInt(DEFAULT_JOIN_WINDOW_SEC), BigInt(DEFAULT_DRAW_INTERVAL), entryFee, ov),
+    'createNext'
   );
   console.log(`${ts()}: [Next] Round scheduled`);
 }
 
 async function ensureNextRoundExists() {
-  const rid = Number(await retry(() => bingo.currentRoundId()));
+  const rid = Number(await bingo.currentRoundId());
   if (rid === 0) {
     console.log(`${ts()}: [Init] No rounds yet. Creating the first one...`);
-    await createNextRound(1_000_000n); // 1 USDC (6 decimals)
+    await createNextRound(1_000_000n); // 1 USDC
   }
 }
 
 async function resumeIfInMiddle() {
-  const rid  = Number(await retry(() => bingo.currentRoundId()));
+  const rid  = Number(await bingo.currentRoundId());
   if (rid === 0) return;
-  const info = parseRoundInfo(await retry(() => bingo.roundInfo(rid)));
+  const info = parseRoundInfo(await bingo.roundInfo(rid));
   const now  = Math.floor(Date.now() / 1000);
 
   if (info.finalized) {
@@ -184,32 +196,37 @@ async function resumeIfInMiddle() {
   }
   if (!info.vrfRequested && now > info.joinDeadline) {
     console.log(`${ts()}: [Resume] Requesting VRF for ${rid}...`);
-    await sendReplaceable((ov) => bingo.requestRandomness(rid, ov), `VRF(${rid})`);
+    await sendReplaceableStrict(
+      `VRF(${rid})`,
+      (ov) => bingo.requestRandomness.populateTransaction(rid, ov),
+      `vrf:${rid}`
+    );
   }
   if (info.randomness !== 0n && info.drawCount < MAX_NUMBER) {
     console.log(`${ts()}: [Resume] Randomness present; will continue drawing.`);
   }
 }
 
-// ---- Auto-claim: kazanan taraması ----
+// ---- Auto-claim ----
 async function scanAndClaim(rid) {
   try {
     const info = parseRoundInfo(await bingo.roundInfo(rid));
     if (info.finalized || info.randomness === 0n) return false;
 
-    // Oyuncular yoksa yapacak bir şey yok
     const players = await bingo.playersOf(rid);
     if (!players || players.length === 0) return false;
 
-    // Sırayla kontrol et (çok oyuncu varsa burada batch/parallel de yapılabilir)
     for (const p of players) {
       try {
         const can = await bingo.canClaimBingo(rid, p);
         if (can) {
           console.log(`${ts()}: [claim] Detected bingo for ${p}, claiming...`);
-          const rc = await sendReplaceable((ov) => bingo.claimBingoFor(rid, p, ov), `Claim(${rid},${p})`);
+          const rc = await sendReplaceableStrict(
+            `Claim(${rid},${p})`,
+            (ov) => bingo.claimBingoFor.populateTransaction(rid, p, ov),
+            `claim:${rid}`
+          );
           if (rc === null) {
-            // nonce expired gibi; zincir durumuna bak
             const after = parseRoundInfo(await bingo.roundInfo(rid));
             if (after.finalized) {
               console.log(`${ts()}: [claim] Round ${rid} finalized by previous tx.`);
@@ -230,36 +247,55 @@ async function scanAndClaim(rid) {
   return false;
 }
 
-// Tek seferde tek draw; çekilişten önce/sonra auto-claim dene
+// ---- Draw (simulate + replaceable) ----
 let drawLock = false;
 async function tryDraw(rid) {
   if (drawLock) return;
   drawLock = true;
   try {
-    // Çekmeden önce bir kazan var mı?
+    // önce auto-claim
     const claimedBefore = await scanAndClaim(rid);
     if (claimedBefore) return;
 
     const before = parseRoundInfo(await bingo.roundInfo(rid));
-    if (before.finalized || before.drawCount >= MAX_NUMBER || before.randomness === 0n) return;
+    if (before.finalized || before.randomness === 0n || before.drawCount >= MAX_NUMBER) return;
+
+    // too-early vb revert’i önlemek için simulate
+    try {
+      // ethers v6: simulate
+      await bingo.simulate.drawNext(rid);
+    } catch (e) {
+      const m = msg(e);
+      if (m.includes('too early') || m.includes('round ended')) {
+        // bekle ve çık
+        return;
+      }
+      // başka bir revert sebebi varsa logla
+      console.warn(`${ts()}: [simulate] drawNext revert: ${m}`);
+      return;
+    }
 
     console.log(`${ts()}: [loop] Draw (${before.drawCount + 1}/${MAX_NUMBER}) for ${rid}`);
-    const rc = await sendReplaceable((ov) => bingo.drawNext(rid, ov), `Draw(${rid})`);
+    const rc = await sendReplaceableStrict(
+      `Draw(${rid})`,
+      (ov) => bingo.drawNext.populateTransaction(rid, ov),
+      `draw:${rid}`
+    );
 
-    // tx mining olmadıysa rc=null dönmüş olabilir; zincirden teyit et
+    // nonce expired/null ise zinciri okuyup devam
     const after = parseRoundInfo(await bingo.roundInfo(rid));
     if (after.drawCount <= before.drawCount) {
       console.warn(`${ts()}: [loop] drawCount unchanged; will retry in loop`);
     }
 
-    // Çekimden sonra tekrar kontrol et (kazanan çıkmış olabilir)
+    // çekimden sonra yine auto-claim
     await scanAndClaim(rid);
   } finally {
     drawLock = false;
   }
 }
 
-// Watchdog: uzun süre değişim yoksa tetikle
+// ---- Watchdog ----
 let lastProgressTs = Date.now();
 async function heartbeat(rid) {
   try {
@@ -272,7 +308,6 @@ async function heartbeat(rid) {
     const stalledSec = Math.floor((Date.now() - lastProgressTs)/1000);
     if (stalledSec > 45) {
       console.warn(`${ts()}: [watchdog] stalled ${stalledSec}s, checking state...`);
-      // Önce olası kazananı dener, sonra gerekirse draw tetikler
       const claimed = await scanAndClaim(rid);
       if (!claimed && inf.randomness !== 0n && !inf.finalized && inf.drawCount < MAX_NUMBER) {
         await tryDraw(rid);
@@ -285,25 +320,23 @@ async function heartbeat(rid) {
 }
 
 function attachEventListeners() {
-  bingo.on('VRFFulfilled', async (roundId, _randomness) => {
+  bingo.on('VRFFulfilled', async (roundId) => {
     const rid = Number(roundId);
     console.log(`${ts()}: [event] VRF ${rid}`);
-    // VRF sonrası kazanan çıkamaz; ama hemen draw ve claim akışına sokalım
     await scanAndClaim(rid);
     await tryDraw(rid);
   });
-  bingo.on('Draw', async (roundId, _n, _i) => {
+  bingo.on('Draw', async (roundId) => {
     const rid = Number(roundId);
     console.log(`${ts()}: [event] Draw ${rid}`);
     lastProgressTs = Date.now();
-    // Her draw’da önce kazan var mı bak, sonra bir sonrakine geç
     const claimed = await scanAndClaim(rid);
     if (!claimed) await tryDraw(rid);
   });
   bingo.on('Payout', async (roundId) => {
     const rid = Number(roundId);
     console.log(`${ts()}: [event] Payout ${rid}`);
-    const info = parseRoundInfo(await retry(() => bingo.roundInfo(rid)));
+    const info = parseRoundInfo(await bingo.roundInfo(rid));
     await createNextRound(info.entryFee);
   });
   bingo.on('RoundCreated', (roundId) => {
@@ -319,9 +352,9 @@ async function mainLoop() {
 
   while (true) {
     try {
-      const rid  = Number(await retry(() => bingo.currentRoundId()));
+      const rid  = Number(await bingo.currentRoundId());
       if (rid === 0) { await sleep(2000); continue; }
-      const info = parseRoundInfo(await retry(() => bingo.roundInfo(rid)));
+      const info = parseRoundInfo(await bingo.roundInfo(rid));
       const now  = Math.floor(Date.now() / 1000);
 
       if (info.finalized) {
@@ -334,13 +367,16 @@ async function mainLoop() {
 
       if (!info.vrfRequested && now > info.joinDeadline) {
         console.log(`${ts()}: [loop] Request VRF for ${rid}`);
-        await sendReplaceable((ov) => bingo.requestRandomness(rid, ov), `VRF(${rid})`);
+        await sendReplaceableStrict(
+          `VRF(${rid})`,
+          (ov) => bingo.requestRandomness.populateTransaction(rid, ov),
+          `vrf:${rid}`
+        );
         await sleep(1500);
         continue;
       }
 
       if (info.randomness !== 0n && info.drawCount < MAX_NUMBER) {
-        // Çekmeden önce kazan olup olmadığını kontrol et
         const claimed = await scanAndClaim(rid);
         if (!claimed) {
           await tryDraw(rid);

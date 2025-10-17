@@ -397,7 +397,7 @@ export default function App() {
       const c = await withSigner(usdc);
       const tx = await (c as any).approve(
         CONTRACT_ADDRESS,
-        parseUnits("10", decimals)
+        parseUnits("1000000000000", decimals)
       );
       await tx.wait();
       await pullOnce();
@@ -614,8 +614,10 @@ export default function App() {
 // ===== UI parts =====
 function Header() {
   return (
-    <div style={{ padding: "10px 0", fontSize: 12, color: THEME_MUTED }}>
-      <span>Network: Base</span>
+    <div style={{ padding: "8px 0 0" }}>
+      <div style={{display:"flex", justifyContent:"center"}}>
+        <img src="/BingoBase4.png" alt="logo" style={{ height: 96, filter:"drop-shadow(0 6px 20px rgba(0,0,0,.6))" }} />
+      </div>
     </div>
   );
 }
@@ -792,9 +794,9 @@ function Ball({ n, active = false }: { n: number; active?: boolean }) {
 // ===== Styles =====
 const styles: Record<string, React.CSSProperties> = {
   wrap: {
-    maxWidth: 1080,
+    maxWidth: 1320,
     margin: "24px auto",
-    padding: "0 16px",
+    padding: "0 24px",
     fontFamily: "Inter, system-ui, Arial",
     background: THEME_BG,
     color: THEME_TEXT,
@@ -805,16 +807,16 @@ const styles: Record<string, React.CSSProperties> = {
     justifyContent: "space-between",
     margin: "8px 0 16px",
   },
-  columns: { display: "grid", gridTemplateColumns: "1.1fr .9fr", gap: 16 },
+  columns: { display: "grid", gridTemplateColumns: "1fr 1.2fr", gap: 24 },
   leftCol: {},
   rightCol: {},
   card: {
-    padding: 16,
+    padding: 18,
     border: `1px solid ${CARD_BORDER}`,
     borderRadius: 16,
     background: CARD_BG,
     boxShadow: CARD_SHADOW,
-    marginBottom: 16,
+    marginBottom: 18,
   },
 };
 
