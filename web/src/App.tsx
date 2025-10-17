@@ -581,13 +581,13 @@ export default function App() {
 
         <div className="bb-banner__inner">
           <div className="bb-banner__logo-wrap">
-            <img className="bb-banner__logo" src="/BingoBase4.png" alt="BingoBase logo" />
+            <img className="bb-banner__logo" src="/BingoBase4.png" alt="BingoBase logo" height={144} />
           </div>
 
           <div className="bb-banner__body">
             <span className="bb-badge"><span className="dot" aria-hidden="true"></span> Built for Base Batches 002 — Builder Track</span>
 
-            <h2 className="bb-title">BingoBase — Fair, Transparent, On-chain Bingo</h2>
+            <h2 className="bb-title">BingoBase.io — Fair, Transparent, On-chain Bingo</h2>
 
             <p className="bb-sub">
               An on-chain, provably random Bingo powered by Chainlink VRF v2.5. <br />
