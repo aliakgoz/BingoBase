@@ -301,7 +301,7 @@ export default function App() {
           setCard([]);
           setCardRoundId(0);
           setLastDrawn(undefined);
-          setDrawFeed([]); // reset feed on round change
+          setDrawFeed([]);
         }
         return ridN;
       });
@@ -310,13 +310,12 @@ export default function App() {
         const r = (await bingo.roundInfo(rid)) as unknown as RoundInfo;
         setRound(r);
 
-        // seed lastDrawn + feed if needed (from real Draw logs, not max number)
         if (Number(r.drawCount) > 0 && lastDrawn === undefined) {
           try {
             const latest = await fetchLatestDraws(ridN, 5);
             if (latest.length) {
-              setLastDrawn(latest[latest.length - 1].n);      // latest (chronological)
-              setDrawFeed(latest.reverse().slice(0,5));        // newest first in UI
+              setLastDrawn(latest[latest.length - 1].n);
+              setDrawFeed(latest.reverse().slice(0,5));
             }
           } catch {}
         }
@@ -381,7 +380,7 @@ export default function App() {
 
     const onDraw = async (_roundId: any, number: number, _idx: number, ev: any) => {
       const n = Number(number);
-      setLastDrawn(n); // authoritative last draw from event
+      setLastDrawn(n);
       try {
         const txHash: string | undefined = ev?.log?.transactionHash || ev?.transactionHash;
         setDrawFeed((prev) => [{ n, tx: txHash, ts: Date.now() }, ...prev].slice(0,5));
@@ -731,55 +730,107 @@ function ChatPanel({ account }:{ account?: string }) {
   const user = `:${last4}`;
   type Msg = { id: string; from: string; text: string; ts: number };
   const [msgs, setMsgs] = useState<Msg[]>(() => {
-    const raw = localStorage.getItem("bb_chat");
+    const raw = localStorage.getItem("bb_chat_v2");
     return raw ? JSON.parse(raw) : [];
   });
   const [text, setText] = useState("");
+  const [status, setStatus] = useState<"disconnected"|"connecting"|"connected">("disconnected");
   const wsRef = useRef<WebSocket | null>(null);
   const listRef = useRef<HTMLDivElement | null>(null);
+  const retryRef = useRef<number>(0);
+  const lastSendRef = useRef<number>(0);
 
+  // persist + autoscroll
   useEffect(() => {
-    localStorage.setItem("bb_chat", JSON.stringify(msgs.slice(-300)));
+    localStorage.setItem("bb_chat_v2", JSON.stringify(msgs.slice(-300)));
     if (listRef.current) listRef.current.scrollTop = listRef.current.scrollHeight;
   }, [msgs]);
 
+  // connect (global room)
   useEffect(() => {
     if (!CHAT_WSS) return;
-    try {
-      const ws = new WebSocket(CHAT_WSS);
-      wsRef.current = ws;
-      ws.onopen = () => { ws.send(JSON.stringify({ type: "join", from: user })); };
-      ws.onmessage = (ev) => {
-        try {
-          const data = JSON.parse(ev.data);
-          if (data?.type === "msg") {
-            const m: Msg = { id: crypto.randomUUID(), from: data.from || ":anon", text: data.text, ts: data.ts || Date.now() };
-            setMsgs((x) => [...x, m]);
-          }
-        } catch {}
-      };
-      ws.onclose = () => { wsRef.current = null; };
-      return () => { ws.close(); };
-    } catch {}
+    let stop = false;
+
+    const connectWs = () => {
+      if (stop) return;
+      try {
+        setStatus("connecting");
+        const ws = new WebSocket(CHAT_WSS);
+        wsRef.current = ws;
+
+        ws.onopen = () => {
+          setStatus("connected");
+          retryRef.current = 0;
+          try { ws.send(JSON.stringify({ type: "join", from: user })); } catch {}
+        };
+
+        ws.onmessage = (ev) => {
+          try {
+            const data = JSON.parse(ev.data);
+            if (data?.type === "msg" && typeof data.text === "string") {
+              const m: Msg = {
+                id: crypto.randomUUID(),
+                from: data.from || ":anon",
+                text: String(data.text).slice(0, 280),
+                ts: Number(data.ts) || Date.now()
+              };
+              setMsgs((x) => [...x, m]);
+            }
+          } catch {}
+        };
+
+        ws.onclose = () => {
+          setStatus("disconnected");
+          wsRef.current = null;
+          // simple backoff reconnect
+          const delay = Math.min(15000, 1000 * (2 ** retryRef.current));
+          retryRef.current += 1;
+          setTimeout(connectWs, delay);
+        };
+
+        ws.onerror = () => {
+          try { ws.close(); } catch {}
+        };
+      } catch {
+        setStatus("disconnected");
+        setTimeout(connectWs, 2000);
+      }
+    };
+
+    connectWs();
+    return () => { stop = true; try { wsRef.current?.close(); } catch {} };
   }, [account]);
 
+  // send helpers (rate-limit + trim)
   const send = () => {
-    const trimmed = text.trim();
+    const trimmed = text.replace(/\s+/g, " ").trim();
     if (!trimmed) return;
-    const m: Msg = { id: crypto.randomUUID(), from: user, text: trimmed, ts: Date.now() };
-    setMsgs((x) => [...x, m]); // server doesn't echo back to sender
+    const now = Date.now();
+    if (now - lastSendRef.current < 500) return; // very light spam control
+    lastSendRef.current = now;
+
+    const safe = trimmed.slice(0, 280);
+    const m: Msg = { id: crypto.randomUUID(), from: user, text: safe, ts: now };
+    setMsgs((x) => [...x, m]); // optimistic (server may not echo to sender)
     setText("");
     if (wsRef.current && wsRef.current.readyState === 1) {
-      wsRef.current.send(JSON.stringify({ type: "msg", from: user, text: trimmed, ts: m.ts }));
+      wsRef.current.send(JSON.stringify({ type: "msg", from: user, text: safe, ts: now }));
     }
   };
   const onKey = (e: React.KeyboardEvent<HTMLInputElement>) => { if (e.key === "Enter") send(); };
 
+  const dot =
+    status === "connected" ? ACTIVE_GREEN :
+    status === "connecting" ? "#f6ad55" : "#ef4444";
+
   return (
     <div style={styles.card}>
       <div style={{display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:12}}>
-        <h3 style={{ margin: 0, fontSize: 18, color: THEME_TEXT }}>Chat</h3>
-        <div style={{ fontSize:12, color:THEME_MUTED }}>You: {user}</div>
+        <h3 style={{ margin: 0, fontSize: 18, color: THEME_TEXT }}>Global Chat</h3>
+        <div style={{ display:"flex", alignItems:"center", gap:8 }}>
+          <span style={{ width:10, height:10, borderRadius:5, background: dot, display:"inline-block" }} />
+          <div style={{ fontSize:12, color:THEME_MUTED }}>You: {user}</div>
+        </div>
       </div>
       <div ref={listRef} style={{height: 420, overflowY: "auto", display:"flex", flexDirection:"column", gap:8, paddingRight:4}}>
         {msgs.length === 0 && <div style={{ color: THEME_MUTED }}>No messages yet. Be the first!</div>}
@@ -790,20 +841,22 @@ function ChatPanel({ account }:{ account?: string }) {
             </div>
             <div>
               <div style={{fontSize:12, color: THEME_MUTED}}>{m.from} • {new Date(m.ts).toLocaleTimeString()}</div>
-              <div style={{fontWeight:600, color: THEME_TEXT}}>{m.text}</div>
+              <div style={{fontWeight:600, color: THEME_TEXT, wordBreak:"break-word"}}>{m.text}</div>
             </div>
           </div>
         ))}
       </div>
       <div style={{display:"flex", gap:8, marginTop:12}}>
         <input
-          placeholder="Type a message..."
+          placeholder={status === "connected" ? "Type a message..." : "Connecting…"}
           value={text}
           onChange={(e) => setText(e.target.value)}
           onKeyDown={onKey}
+          disabled={status !== "connected"}
+          maxLength={280}
           style={{flex:1, background: "#0f141b", color: THEME_TEXT, border:`1px solid ${CARD_BORDER}`, borderRadius:10, padding:"10px 12px"}}
         />
-        <button style={btnPrimary(true)} onClick={send}>Send</button>
+        <button style={btnPrimary(status === "connected")} disabled={status !== "connected"} onClick={send}>Send</button>
       </div>
     </div>
   );
