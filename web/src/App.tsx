@@ -17,7 +17,7 @@ const CHAT_WSS         = (import.meta.env.VITE_CHAT_WSS as string) || "";
 
 // ===== CONSTS =====
 const EXPLORER = "https://basescan.org"; // Base mainnet
-const LAST_LOG_LOOKBACK = 20000;          // blocks to look back for Draw logs
+const LAST_LOG_LOOKBACK = 20000;          // how many blocks back to search for Draw logs
 
 // ===== THEME =====
 const THEME_BG = "#0b0f14";
@@ -110,9 +110,20 @@ function useProviders() {
 
   const [write, setWrite] = useState<BrowserProvider>();
   useEffect(() => {
-    if ((window as any).ethereum) {
-      try { setWrite(new BrowserProvider((window as any).ethereum)); }
-      catch (e) { console.warn("BrowserProvider init failed:", e); }
+    const eth = (window as any).ethereum;
+    try {
+      if (eth) setWrite(new BrowserProvider(eth));
+    } catch (e) {
+      console.warn("BrowserProvider init failed:", e);
+    }
+    if (eth?.on) {
+      const reload = () => location.reload();
+      eth.on("chainChanged", reload);
+      eth.on("accountsChanged", reload);
+      return () => {
+        eth.removeListener?.("chainChanged", reload);
+        eth.removeListener?.("accountsChanged", reload);
+      };
     }
   }, []);
 
@@ -155,7 +166,7 @@ export default function App() {
   // drawn highlighting (only last = green)
   const [lastDrawn, setLastDrawn]           = useState<number | undefined>(undefined);
 
-  // last 5 draws feed
+  // last 5 draws feed (not in chat)
   type Feed = { n: number; tx?: string; ts: number };
   const [drawFeed, setDrawFeed] = useState<Feed[]>([]);
 
@@ -212,7 +223,7 @@ export default function App() {
     if (read && USDC_ADDRESS) setUsdc(new Contract(USDC_ADDRESS, ERC20_ABI, read));
   }, [read, readWs, readProviderName]);
 
-  // latest block
+  // latest block ticker
   useEffect(() => {
     if (!read) return;
     let stop = false;
@@ -229,16 +240,39 @@ export default function App() {
     return () => { stop = true; };
   }, [read, readWs]);
 
-  // wallet connect
+  // ===== Wallet connect (with mobile deep-link fallback) =====
   const connect = async () => {
-    if (!write) return alert("No wallet found.");
-    const accs = await write.send("eth_requestAccounts", []);
-    setAccount(accs[0]);
-    const net = await write.getNetwork();
-    setChainId(Number(net.chainId));
+    const eth = (window as any).ethereum;
+    const isMobile = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
+    if (eth) {
+      try {
+        const provider = new BrowserProvider(eth);
+        const accs = await provider.send("eth_requestAccounts", []);
+        setAccount(accs[0]);
+        const net = await provider.getNetwork();
+        setChainId(Number(net.chainId));
+        return;
+      } catch (e:any) {
+        alert(e?.message ?? "Wallet connection failed");
+        return;
+      }
+    }
+    if (isMobile) {
+      const dapp = location.href.replace(/^https?:\/\//, "");
+      const metamask = `https://metamask.app.link/dapp/${dapp}`;
+      const baseWallet = `https://go.cb-w.com/dapp?cb_url=${encodeURIComponent(location.href)}`;
+      try {
+        window.open(metamask, "_self");
+        setTimeout(() => window.open(baseWallet, "_self"), 1200);
+      } catch {
+        location.href = metamask;
+      }
+    } else {
+      alert("No wallet detected. Please install MetaMask or use a mobile wallet browser.");
+    }
   };
 
-  // helpers to read latest 1..5 Draw logs
+  // helper: read latest Draw logs to seed feed/lastDrawn on load
   async function fetchLatestDraws(ridN: number, take = 5) {
     if (!bingo || !read) return [];
     const fromBlock = Math.max(0, (latestBlock || 0) - LAST_LOG_LOOKBACK);
@@ -276,13 +310,13 @@ export default function App() {
         const r = (await bingo.roundInfo(rid)) as unknown as RoundInfo;
         setRound(r);
 
-        // seed lastDrawn + feed if needed
+        // seed lastDrawn + feed if needed (from real Draw logs, not max number)
         if (Number(r.drawCount) > 0 && lastDrawn === undefined) {
           try {
             const latest = await fetchLatestDraws(ridN, 5);
             if (latest.length) {
-              setLastDrawn(latest[latest.length - 1].n);
-              setDrawFeed(latest.reverse().slice(0,5)); // newest first
+              setLastDrawn(latest[latest.length - 1].n);      // latest (chronological)
+              setDrawFeed(latest.reverse().slice(0,5));        // newest first in UI
             }
           } catch {}
         }
@@ -347,7 +381,7 @@ export default function App() {
 
     const onDraw = async (_roundId: any, number: number, _idx: number, ev: any) => {
       const n = Number(number);
-      setLastDrawn(n);
+      setLastDrawn(n); // authoritative last draw from event
       try {
         const txHash: string | undefined = ev?.log?.transactionHash || ev?.transactionHash;
         setDrawFeed((prev) => [{ n, tx: txHash, ts: Date.now() }, ...prev].slice(0,5));
