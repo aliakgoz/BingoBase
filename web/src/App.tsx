@@ -291,10 +291,12 @@ const chatSendRef = useRef<((text: string) => void) | null>(null);
       if (ridN > 0) {
         const r = (await bingo.roundInfo(rid)) as unknown as RoundInfo;
         setRound(r);
-        if (lastDrawn === undefined && r.drawnMask !== 0n) {
-          const list = Array.from({ length: MAX_NUMBER }, (_, i) => i + 1)
+        if (lastDrawn === undefined && Number(r.drawCount) > 0) {
+          const lastIndex = Number(r.drawCount); // use drawCount instead of max number
+          const allNumbers = Array.from({ length: MAX_NUMBER }, (_, i) => i + 1)
             .filter(n => ((r.drawnMask & (1n << BigInt(n-1))) !== 0n));
-          if (list.length) setLastDrawn(list[list.length - 1]); // naive fallback
+          const guessed = allNumbers[lastIndex - 1] ?? allNumbers[allNumbers.length - 1];
+          if (guessed) setLastDrawn(guessed);
         }
       } else {
         setRound(undefined);
