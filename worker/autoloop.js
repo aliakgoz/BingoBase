@@ -1,4 +1,4 @@
-// autoloop.js — Base Mainnet • resilient loop (auto-next-round on no-winner) • Ethers v6
+// autoloop.js — Base Mainnet • resilient loop (auto-next-round even with no players) • Ethers v6
 import 'dotenv/config';
 import { Contract, JsonRpcProvider, Wallet } from 'ethers';
 import fs from 'node:fs';
@@ -10,11 +10,12 @@ const PK        = process.env.SYSTEM_PK;
 const CONTRACT  = process.env.CONTRACT;
 
 const MAX_NUMBER = 90;
-const DEFAULT_JOIN_WINDOW_SEC = 240;
-const DEFAULT_DRAW_INTERVAL   = 5;
+const DEFAULT_JOIN_WINDOW_SEC = 240;     // 4 dk join
+const DEFAULT_DRAW_INTERVAL   = 5;       // çekiliş aralığı (sn)
+const START_BUFFER_SEC        = 180;     // yeni raund startTime için tampon (3 dk)
 const POLL_MS                 = 1500;
 const TX_TIMEOUT_MS           = 20000;
-const FEE_BUMP_NUM            = 130n;
+const FEE_BUMP_NUM            = 130n;    // %30 fee bump
 const FEE_BUMP_DEN            = 100n;
 
 // ===== ABI =====
@@ -57,6 +58,9 @@ async function getSafeFees(){
 
 // ---- Replacement pool (per logical slot) ----
 const pendingSlots=new Map();
+/**
+ * buildTx(ov) her denemede çağrılır; böylece createRound için startTime’ı her seferinde now+BUFFER olarak tazeleyebiliriz.
+ */
 async function sendReplaceable(label, buildTx, slotKey=label){
   let slot = pendingSlots.get(slotKey);
   if(!slot){
@@ -86,7 +90,15 @@ async function sendReplaceable(label, buildTx, slotKey=label){
       return rc;
     }catch(e){
       const m = msg(e);
-      if(m.includes('underpriced') || m.includes('replacement') ){
+      // createRound özel durum: "start must be future" → tekrar dene (startTime her seferinde yeniden hesaplanacak)
+      if(m.includes('start must be future')){
+        console.warn(`${ts()}: [createNext] start in past → recompute & retry`);
+        slot.maxPriorityFeePerGas = bump(slot.maxPriorityFeePerGas);
+        slot.maxFeePerGas         = bump(slot.maxFeePerGas);
+        await sleep(500); // minicik bekle
+        continue;
+      }
+      if(m.includes('underpriced') || m.includes('replacement')){
         slot.maxPriorityFeePerGas = bump(slot.maxPriorityFeePerGas);
         slot.maxFeePerGas         = bump(slot.maxFeePerGas);
         continue;
@@ -127,19 +139,46 @@ function parseRoundInfo(i){
 }
 
 // ---- Game control ----
+let lastCreateAt = 0;
 async function createNextRound(entryFee){
-  const now = Math.floor(Date.now()/1000);
-  await sendReplaceable(
-    `CreateNext(${now+10})`,
-    (ov)=> bingo.createRound.populateTransaction(
-      BigInt(now + 10),
+  const nowMs = Date.now();
+  if (nowMs - lastCreateAt < 1500) {
+    // hızlı ardışık çağrıları sakinleştir
+    await sleep(1000);
+  }
+  // Her denemede startTime’ı yeniden hesaplayacağız (populateTransaction içinde)
+  const simulateStart = Math.floor(Date.now()/1000) + START_BUFFER_SEC;
+  try{
+    // Simülasyon (başlarken başarısızsa hızlıca gör)
+    await bingo.getFunction('createRound').staticCall(
+      BigInt(simulateStart),
       BigInt(DEFAULT_JOIN_WINDOW_SEC),
       BigInt(DEFAULT_DRAW_INTERVAL),
-      entryFee,
-      ov
-    ),
-    'createNext'
+      entryFee
+    );
+  }catch(e){
+    const m = msg(e);
+    if(!m.includes('start must be future')){
+      console.warn(`${ts()}: [simulate create] ${m}`);
+    }
+    // continue; — yine de deneyeceğiz çünkü madencilenme gecikmesiyle farklılaşabilir
+  }
+
+  await sendReplaceable(
+    `CreateNext(dynamic)`,
+    (ov)=>{
+      const start = BigInt(Math.floor(Date.now()/1000) + START_BUFFER_SEC);
+      return bingo.createRound.populateTransaction(
+        start,
+        BigInt(DEFAULT_JOIN_WINDOW_SEC),
+        BigInt(DEFAULT_DRAW_INTERVAL),
+        entryFee,
+        ov
+      );
+    },
+    'createNext' // tek slot, aynı nonce ile replace
   );
+  lastCreateAt = Date.now();
   console.log(`${ts()}: [Next] Round scheduled`);
 }
 
@@ -220,7 +259,6 @@ async function tryDraw(rid){
       }
       if(m.includes('all numbers') || m.includes('all numbers drawn')){
         console.warn(`${ts()}: [simulate] all numbers drawn`);
-        // fail-safe: yeni round
         const info = parseRoundInfo(await bingo.roundInfo(rid));
         if(!info.finalized) await createNextRound(info.entryFee);
         return;
@@ -285,7 +323,6 @@ function attachEventListeners(){
     lastProgressTs = Date.now();
     const i = parseRoundInfo(await bingo.roundInfo(rid));
     if(i.drawCount >= MAX_NUMBER && !i.finalized){
-      // güvenlik: tüm sayılar çekilmiş → yeni raund
       await createNextRound(i.entryFee);
       return;
     }
@@ -307,7 +344,6 @@ async function mainLoop(){
   const net = await provider.getNetwork();
   console.log(`${ts()}: [startup] chainId=${Number(net.chainId)}`);
   if(Number(net.chainId) !== 8453) throw new Error('Wrong network (need Base mainnet)');
-  // bytecode check
   const code = await provider.getCode(CONTRACT);
   if(!code || code === '0x') throw new Error(`No bytecode at ${CONTRACT}`);
 
@@ -343,7 +379,6 @@ async function mainLoop(){
 
       if(!info.vrfRequested && now > info.joinDeadline){
         console.log(`${ts()}: [loop] Request VRF for ${rid}`);
-        // simulate: sadece güvenlik (çok gerekli değil)
         try{
           await bingo.getFunction('requestRandomness').staticCall(rid);
         }catch(e){
