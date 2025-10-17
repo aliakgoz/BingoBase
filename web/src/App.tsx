@@ -443,6 +443,25 @@ export default function App() {
     return `Drawing... (${round.drawCount}/${MAX_NUMBER})`;
   }, [round, nowSec]);
 
+  // Set tab title + favicon
+  useEffect(() => {
+    try {
+      document.title = "BingoBase.io";
+      const setIcon = (href: string, rel: string) => {
+        let link = document.querySelector(`link[rel='${rel}']`) as HTMLLinkElement | null;
+        if (!link) {
+          link = document.createElement('link');
+          link.rel = rel;
+          document.head.appendChild(link);
+        }
+        link.href = href;
+      };
+      setIcon('/BingoBase4.png', 'icon');
+      setIcon('/BingoBase4.png', 'shortcut icon');
+      setIcon('/BingoBase4.png', 'apple-touch-icon');
+    } catch {}
+  }, []);
+
   const explorerBase = (cid?: number) =>
     cid === 8453 ? "https://basescan.org" : "https://sepolia.basescan.org";
 
@@ -484,7 +503,7 @@ export default function App() {
 
       <section style={styles.hero}>
         <div>
-          <h1 style={{ margin: 0, fontSize: 36, color: THEME_TEXT }}>BingoBase</h1>
+          <h1 style={{ margin: 0, fontSize: 36, color: THEME_TEXT }}>BingoBase.io</h1>
           <p style={{ marginTop: 8, color: THEME_MUTED }}>
             Provably fair on-chain Bingo on Base • Chainlink VRF v2.5
           </p>
