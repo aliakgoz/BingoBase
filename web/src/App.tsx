@@ -793,7 +793,9 @@ export default function App() {
 
             <p className="bb-sub">
               An on-chain, provably random Bingo powered by Chainlink VRF v2.5. <br />
-              <strong>Each game means at least 100 transactions on Base.</strong>
+              <strong>Each game means at least 100 transactions on Base.</strong> <br />
+              contact: fractaliaio@gmail.com
+
             </p>
 
             <div className="bb-points">
