@@ -1,22 +1,24 @@
-// autoloop.js — Base Mainnet • resilient loop (auto-next-round even with no players) • Ethers v6
+// autoloop.js — Base Mainnet • resilient loop (WSS-safe, auto-next-round) • Ethers v6
 import 'dotenv/config';
-import { Contract, JsonRpcProvider, Wallet } from 'ethers';
+import { Contract, JsonRpcProvider, WebSocketProvider, Wallet } from 'ethers';
 import fs from 'node:fs';
 import path from 'node:path';
 
 // ===== ENV =====
 const RPC       = process.env.RPC_URL;
+const WSS       = process.env.RPC_WSS;             // ör: wss://base-rpc.publicnode.com
 const PK        = process.env.SYSTEM_PK;
 const CONTRACT  = process.env.CONTRACT;
 
-const MAX_NUMBER = 90;
-const DEFAULT_JOIN_WINDOW_SEC = 240;     // 4 dk join
-const DEFAULT_DRAW_INTERVAL   = 5;       // çekiliş aralığı (sn)
-const START_BUFFER_SEC        = 5;     // yeni raund startTime için tampon (3 dk)
-const POLL_MS                 = 1500;
-const TX_TIMEOUT_MS           = 20000;
-const FEE_BUMP_NUM            = 130n;    // %30 fee bump
-const FEE_BUMP_DEN            = 100n;
+const MAX_NUMBER               = 90;
+const DEFAULT_JOIN_WINDOW_SEC  = 240;
+const DEFAULT_DRAW_INTERVAL    = 5;
+const START_BUFFER_SEC         = 5;
+const POLL_MS                  = 1500;
+const TX_TIMEOUT_MS            = 20000;
+const FEE_BUMP_NUM             = 130n;
+const FEE_BUMP_DEN             = 100n;
+const WSS_PING_MS              = 20000;           // WSS sağlık kontrolü
 
 // ===== ABI =====
 const abiPath = path.join(process.cwd(), 'BaseBingo25.abi.json');
@@ -35,32 +37,64 @@ const provider = new JsonRpcProvider(RPC);
 const signer   = new Wallet(PK, provider);
 const bingo    = new Contract(CONTRACT, bingoAbi, signer);
 
-// ===== Utils =====
+// ===== WSS (events) — dahili alanlara dokunmadan =====
+let wsProv = WSS ? new WebSocketProvider(WSS) : null;
+let bingoEvents = wsProv ? new Contract(CONTRACT, bingoAbi, wsProv) : null;
+let wssPingTimer = 0;
+
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const ts = () => new Date().toISOString();
 const msg = (e) => e?.shortMessage ?? e?.info?.error?.message ?? e?.message ?? String(e);
 
-// ---- Fee helpers ----
-const MIN_PRIORITY = 100_000n; // 0.1 gwei
-const MIN_FEE      = 500_000n; // 0.5 gwei
+async function startWssPingLoop() {
+  if (!wsProv) return;
+  if (wssPingTimer) clearInterval(wssPingTimer);
+  wssPingTimer = setInterval(async () => {
+    try {
+      // ping: son blok numarası çek; hata alırsak reconnect dene
+      await wsProv.getBlockNumber();
+    } catch (e) {
+      console.warn(`${ts()}: [WSS] ping failed → reconnect: ${msg(e)}`);
+      await reconnectWSS();
+    }
+  }, WSS_PING_MS);
+}
+
+async function reconnectWSS() {
+  try {
+    if (wssPingTimer) { clearInterval(wssPingTimer); wssPingTimer = 0; }
+    if (wsProv) { try { await wsProv.destroy(); } catch {} }
+  } catch {}
+  try {
+    wsProv = WSS ? new WebSocketProvider(WSS) : null;
+    bingoEvents = wsProv ? new Contract(CONTRACT, bingoAbi, wsProv) : null;
+    attachEventListeners();
+    await startWssPingLoop();
+    console.log(`${ts()}: [WSS] reconnected`);
+  } catch (e) {
+    console.error(`${ts()}: [WSS] reconnect failed: ${msg(e)}`);
+    setTimeout(reconnectWSS, 5000);
+  }
+}
+
+// ===== Fee helpers =====
+const MIN_PRIORITY = 100_000n;  // 0.1 gwei
+const MIN_FEE      = 500_000n;  // 0.5 gwei
 function bump(n){ return (n * FEE_BUMP_NUM) / FEE_BUMP_DEN; }
 async function getSafeFees(){
   const fd = await provider.getFeeData();
   let p = fd.maxPriorityFeePerGas ?? MIN_PRIORITY;
   let f = fd.maxFeePerGas ?? MIN_FEE;
-  if(p < MIN_PRIORITY) p = MIN_PRIORITY;
-  if(f < MIN_FEE)      f = MIN_FEE;
+  if (p < MIN_PRIORITY) p = MIN_PRIORITY;
+  if (f < MIN_FEE)      f = MIN_FEE;
   const b = (await provider.getBlock('latest'))?.baseFeePerGas ?? 0n;
   const safe = b*2n + p;
-  if(f < safe) f = safe;
+  if (f < safe) f = safe;
   return { maxPriorityFeePerGas: p, maxFeePerGas: f };
 }
 
-// ---- Replacement pool (per logical slot) ----
+// ===== Replacement pool =====
 const pendingSlots=new Map();
-/**
- * buildTx(ov) her denemede çağrılır; böylece createRound için startTime’ı her seferinde now+BUFFER olarak tazeleyebiliriz.
- */
 async function sendReplaceable(label, buildTx, slotKey=label){
   let slot = pendingSlots.get(slotKey);
   if(!slot){
@@ -90,12 +124,11 @@ async function sendReplaceable(label, buildTx, slotKey=label){
       return rc;
     }catch(e){
       const m = msg(e);
-      // createRound özel durum: "start must be future" → tekrar dene (startTime her seferinde yeniden hesaplanacak)
       if(m.includes('start must be future')){
-        console.warn(`${ts()}: [createNext] start in past → recompute & retry`);
+        console.warn(`${ts()}: [createNext] start in past → retry`);
         slot.maxPriorityFeePerGas = bump(slot.maxPriorityFeePerGas);
         slot.maxFeePerGas         = bump(slot.maxFeePerGas);
-        await sleep(500); // minicik bekle
+        await sleep(500);
         continue;
       }
       if(m.includes('underpriced') || m.includes('replacement')){
@@ -105,7 +138,7 @@ async function sendReplaceable(label, buildTx, slotKey=label){
       }
       if(m.includes('nonce too low') || m.includes('NONCE_EXPIRED')){
         pendingSlots.delete(slotKey);
-        return null; // state üstten teyit edilecek
+        return null;
       }
       if(m.includes('insufficient funds') || m.includes('intrinsic transaction cost')){
         console.error(`${ts()}: [funds] ${m}`);
@@ -120,7 +153,7 @@ async function sendReplaceable(label, buildTx, slotKey=label){
   throw new Error(`${label} failed after multiple replacements`);
 }
 
-// ---- Round parsing ----
+// ===== Round parsing =====
 function parseRoundInfo(i){
   return {
     startTime:    Number(i[0]),
@@ -138,18 +171,13 @@ function parseRoundInfo(i){
   };
 }
 
-// ---- Game control ----
+// ===== Game control =====
 let lastCreateAt = 0;
 async function createNextRound(entryFee){
   const nowMs = Date.now();
-  if (nowMs - lastCreateAt < 1500) {
-    // hızlı ardışık çağrıları sakinleştir
-    await sleep(1000);
-  }
-  // Her denemede startTime’ı yeniden hesaplayacağız (populateTransaction içinde)
+  if (nowMs - lastCreateAt < 1500) await sleep(1000);
   const simulateStart = Math.floor(Date.now()/1000) + START_BUFFER_SEC;
   try{
-    // Simülasyon (başlarken başarısızsa hızlıca gör)
     await bingo.getFunction('createRound').staticCall(
       BigInt(simulateStart),
       BigInt(DEFAULT_JOIN_WINDOW_SEC),
@@ -158,15 +186,11 @@ async function createNextRound(entryFee){
     );
   }catch(e){
     const m = msg(e);
-    if(!m.includes('start must be future')){
-      console.warn(`${ts()}: [simulate create] ${m}`);
-    }
-    // continue; — yine de deneyeceğiz çünkü madencilenme gecikmesiyle farklılaşabilir
+    if(!m.includes('start must be future')) console.warn(`${ts()}: [simulate create] ${m}`);
   }
-
   await sendReplaceable(
     `CreateNext(dynamic)`,
-    (ov)=>{
+    (ov) => {
       const start = BigInt(Math.floor(Date.now()/1000) + START_BUFFER_SEC);
       return bingo.createRound.populateTransaction(
         start,
@@ -176,7 +200,7 @@ async function createNextRound(entryFee){
         ov
       );
     },
-    'createNext' // tek slot, aynı nonce ile replace
+    'createNext'
   );
   lastCreateAt = Date.now();
   console.log(`${ts()}: [Next] Round scheduled`);
@@ -186,11 +210,11 @@ async function ensureNextRoundExists(){
   const rid = Number(await bingo.currentRoundId());
   if(rid === 0){
     console.log(`${ts()}: [Init] No rounds yet`);
-    await createNextRound(1_000_000n); // 1 USDC
+    await createNextRound(1_000_000n);
   }
 }
 
-// ---- Auto-claim (winner scan) ----
+// ===== Auto-claim =====
 async function scanAndClaim(rid){
   try{
     const info = parseRoundInfo(await bingo.roundInfo(rid));
@@ -198,9 +222,8 @@ async function scanAndClaim(rid){
 
     const players = await bingo.playersOf(rid);
     if(!players || players.length === 0){
-      // oyuncu yok → eğer tüm sayılar çekildiyse yeni raund aç
       if(info.drawCount >= MAX_NUMBER && !info.finalized){
-        console.log(`${ts()}: [claim] No players & all drawn → start next round`);
+        console.log(`${ts()}: [claim] No players & all drawn → next round`);
         await createNextRound(info.entryFee);
         return true;
       }
@@ -224,9 +247,8 @@ async function scanAndClaim(rid){
       }
     }
 
-    // kimse kazanamadı ve 90/90 olduysa → yeni round (kontrat finalize etmiyor)
     if(info.drawCount >= MAX_NUMBER && !info.finalized){
-      console.log(`${ts()}: [claim] No winner after all draws → starting next round`);
+      console.log(`${ts()}: [claim] No winner after all draws → next round`);
       await createNextRound(info.entryFee);
       return true;
     }
@@ -236,35 +258,29 @@ async function scanAndClaim(rid){
   return false;
 }
 
-// ---- Draw (simulate before sending) ----
+// ===== Draw (simulate önce) =====
 let drawLock=false;
 async function tryDraw(rid){
   if(drawLock) return;
   drawLock = true;
   try{
-    // önce kazan var mı?
     if(await scanAndClaim(rid)) return;
 
     const before = parseRoundInfo(await bingo.roundInfo(rid));
     if(before.finalized || before.randomness === 0n) return;
 
-    // too early / all numbers? – simulate
     try{
       await bingo.getFunction('drawNext').staticCall(rid);
     }catch(e){
       const m = msg(e);
-      if(m.includes('too early')){
-        console.warn(`${ts()}: [simulate] too early`);
-        return;
-      }
-      if(m.includes('all numbers') || m.includes('all numbers drawn')){
+      if(m.includes('too early')){ console.warn(`${ts()}: [simulate] too early`); return; }
+      if(m.includes('all numbers')){
         console.warn(`${ts()}: [simulate] all numbers drawn`);
         const info = parseRoundInfo(await bingo.roundInfo(rid));
         if(!info.finalized) await createNextRound(info.entryFee);
         return;
       }
-      console.warn(`${ts()}: [simulate] ${m}`);
-      return;
+      console.warn(`${ts()}: [simulate] ${m}`); return;
     }
 
     console.log(`${ts()}: [loop] Draw (${before.drawCount + 1}/${MAX_NUMBER}) for ${rid}`);
@@ -279,14 +295,13 @@ async function tryDraw(rid){
       if(a.drawCount <= before.drawCount) console.warn(`${ts()}: drawCount unchanged`);
     }
 
-    // çekimden sonra yine kontrol
     await scanAndClaim(rid);
   }finally{
     drawLock = false;
   }
 }
 
-// ---- Watchdog ----
+// ===== Watchdog =====
 let lastProgressTs=Date.now();
 async function heartbeat(rid){
   try{
@@ -310,15 +325,17 @@ async function heartbeat(rid){
   }
 }
 
-// ---- Events ----
+// ===== Events (WSS varsa onu kullan) =====
 function attachEventListeners(){
-  bingo.on('VRFFulfilled', async (roundId)=> {
-    const rid = Number(roundId);
+  const c = bingoEvents ?? bingo;
+  try { c.removeAllListeners(); } catch {}
+  c.on('VRFFulfilled', async (r)=> {
+    const rid = Number(r);
     console.log(`${ts()}: [event] VRF ${rid}`);
     await tryDraw(rid);
   });
-  bingo.on('Draw', async (roundId)=> {
-    const rid = Number(roundId);
+  c.on('Draw', async (r)=> {
+    const rid = Number(r);
     console.log(`${ts()}: [event] Draw ${rid}`);
     lastProgressTs = Date.now();
     const i = parseRoundInfo(await bingo.roundInfo(rid));
@@ -326,20 +343,20 @@ function attachEventListeners(){
       await createNextRound(i.entryFee);
       return;
     }
-    await tryDraw(rid); // bir sonraki
+    await tryDraw(rid);
   });
-  bingo.on('Payout', async (roundId)=> {
-    const rid = Number(roundId);
+  c.on('Payout', async (r)=> {
+    const rid = Number(r);
     console.log(`${ts()}: [event] Payout ${rid}`);
     const i = parseRoundInfo(await bingo.roundInfo(rid));
     await createNextRound(i.entryFee);
   });
-  bingo.on('RoundCreated', (roundId)=> {
-    console.log(`${ts()}: [event] RoundCreated ${Number(roundId)}`);
+  c.on('RoundCreated', (r)=> {
+    console.log(`${ts()}: [event] RoundCreated ${Number(r)}`);
   });
 }
 
-// ---- Main loop ----
+// ===== Main loop =====
 async function mainLoop(){
   const net = await provider.getNetwork();
   console.log(`${ts()}: [startup] chainId=${Number(net.chainId)}`);
@@ -349,6 +366,7 @@ async function mainLoop(){
 
   await ensureNextRoundExists();
   attachEventListeners();
+  if (wsProv) await startWssPingLoop();
 
   while(true){
     try{
@@ -364,11 +382,11 @@ async function mainLoop(){
         continue;
       }
 
-      // kimse join etmediyse ve join bitti ise: VRF isteme, direkt yeni round
+      // oyuncu yok & join bitti → VRF atla, yeni round
       if(!info.vrfRequested && now > info.joinDeadline){
         const players = await bingo.playersOf(rid);
         if(!players || players.length === 0){
-          console.log(`${ts()}: [loop] No players; skipping VRF → start next`);
+          console.log(`${ts()}: [loop] No players → next`);
           await createNextRound(info.entryFee);
           await sleep(1500);
           continue;
@@ -383,7 +401,7 @@ async function mainLoop(){
           await bingo.getFunction('requestRandomness').staticCall(rid);
         }catch(e){
           const m = msg(e);
-          if(m.includes('already requested')){ /* ignore */ }
+          if(m.includes('already requested')){/* ignore */}
           else if(m.includes('join not ended')){ await sleep(1000); continue; }
           else { console.warn(`${ts()}: [simulate VRF] ${m}`); }
         }
@@ -396,9 +414,8 @@ async function mainLoop(){
         continue;
       }
 
-      // tüm sayılar çekilmiş ama finalize yok → yeni round
       if(info.randomness !== 0n && info.drawCount >= MAX_NUMBER && !info.finalized){
-        console.log(`${ts()}: [loop] All numbers drawn & not finalized → start next`);
+        console.log(`${ts()}: [loop] All numbers drawn → next`);
         await createNextRound(info.entryFee);
         await sleep(1500);
         continue;
