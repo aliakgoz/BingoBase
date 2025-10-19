@@ -11,23 +11,23 @@
     "version": "1",
     "name": "BingoBase",
     "homeUrl": "https://bingobase.io",
-    "iconUrl": "${ORIGIN}/BingoBase4.png",
-    "splashImageUrl": "${ORIGIN}/BingoBase4.png",
+    "iconUrl": "https://bingobase.io/BingoBase4.png",
+    "splashImageUrl": "https://bingobase.io/BingoBase4.png",
     "splashBackgroundColor": "#0b0f14",
     "webhookUrl": "",
     "subtitle": "On-chain Bingo on Base",
     "description": "Provably fair Chainlink VRF bingo. 1 USDC to enter, winner takes all.",
     "screenshotUrls": [
-      "${ORIGIN}/screenshots/home-game.png",
-        "${ORIGIN}/screenshots/game2.png"
+      "https://bingobase.io/screenshots/home-game.png",
+        "https://bingobase.io/screenshots/game2.png"
     ],
     "primaryCategory": "gaming",
     "tags": ["bingo", "baseapp", "miniapp", "onchain"],
-    "heroImageUrl": "${ORIGIN}/BingoBase4.png",
+    "heroImageUrl": "https://bingobase.io/BingoBase4.png",
     "tagline": "Join a round. Win the pool.",
     "ogTitle": "BingoBase",
     "ogDescription": "Fair, transparent, on-chain bingo on Base.",
-    "ogImageUrl": "${ORIGIN}/BingoBase4.png",
+    "ogImageUrl": "https://bingobase.io/BingoBase4.png",
     "noindex": false
   }
 }
