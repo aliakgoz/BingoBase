@@ -1,4 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { sdk } from "@farcaster/miniapp-sdk";
+
 import {
   BrowserProvider,
   Contract,
@@ -110,6 +112,7 @@ function useProviders() {
 
   const [write, setWrite] = useState<BrowserProvider>();
   useEffect(() => {
+    
     const eth = (window as any).ethereum;
     try {
       if (eth) setWrite(new BrowserProvider(eth));
@@ -141,6 +144,7 @@ export default function App() {
   const [readProviderName, setReadProviderName] = useState<string>("(unused)");
   const read = readWs ?? readHttp;
   useEffect(() => {
+    sdk.actions.ready(); // içerik görünür, splash gizlenir
     setReadProviderName(readWs ? "WSS" : (readHttp ? "HTTP" : "(none)"));
     if (!readWs && !readHttp) console.error("No RPC providers configured.");
   }, [readWs, readHttp]);

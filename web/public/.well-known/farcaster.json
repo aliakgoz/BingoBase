@@ -16,7 +16,7 @@
     "splashImageUrl": "https://bingobase.io/BingoBase4.png",
     "splashBackgroundColor": "#0b0f14",
       "subtitle": "On-chain Bingo on Base",
-    "description": "Provably fair Chainlink VRF bingo. 1 USDC to enter, winner takes all.",
+    "description": "Provably fair VRF Bingo. 1 USDC to enter, winner takes all.",
     "screenshotUrls": [
       "https://bingobase.io/screenshots/home-game.png",
         "https://bingobase.io/screenshots/game2.png"
