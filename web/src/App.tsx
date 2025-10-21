@@ -100,51 +100,87 @@ type RoundInfo = {
   prizePoolUSDC: bigint;
 };
 
+// ---- Universal EIP-1193 Provider discovery ----
+function getUniversalEip1193(): any | null {
+  try {
+    const evmFromSDK = sdk?.wallet?.getEthereumProvider?.();
+    if (evmFromSDK) return evmFromSDK;        // Base App Mini App ortamı
+  } catch {}
+  if (typeof window !== "undefined" && (window as any).ethereum) {
+    return (window as any).ethereum;          // Chrome/MetaMask vb.
+  }
+  return null;
+}
+
+function isMobileUA() {
+  return /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
+}
+
 function useProviders() {
   const readWs = useMemo(
     () => (RPC_WSS ? new WebSocketProvider(RPC_WSS) : undefined),
-    []
+    [RPC_WSS]
   );
   const readHttp = useMemo(
     () => (RPC_URL ? new JsonRpcProvider(RPC_URL) : undefined),
-    []
+    [RPC_URL]
   );
 
   const [write, setWrite] = useState<BrowserProvider>();
+  const [account, setAccount] = useState<string>("");
+  const [chainId, setChainId] = useState<number | undefined>(undefined);
+
   useEffect(() => {
-    
-    const eth = (window as any).ethereum;
+    const eth = getUniversalEip1193();
+
+    // create BrowserProvider once
     try {
       if (eth) setWrite(new BrowserProvider(eth));
     } catch (e) {
       console.warn("BrowserProvider init failed:", e);
     }
-    if (eth?.on) {
-      const reload = () => location.reload();
-      eth.on("chainChanged", reload);
-      eth.on("accountsChanged", reload);
-      return () => {
-        eth.removeListener?.("chainChanged", reload);
-        eth.removeListener?.("accountsChanged", reload);
-      };
-    }
+
+    // initialize state (no reloads)
+    const init = async () => {
+      try {
+        if (!eth?.request) return;
+        const accs = await eth.request({ method: "eth_accounts" });
+        if (Array.isArray(accs) && accs.length > 0) setAccount(accs[0]);
+        const cid = await eth.request({ method: "eth_chainId" });
+        if (cid) setChainId(Number(cid));
+      } catch {}
+    };
+    init();
+
+    // listen changes – update state instead of reloading
+    const onAccountsChanged = (accs: string[]) => {
+      const a = Array.isArray(accs) && accs.length ? accs[0] : "";
+      setAccount(a);
+    };
+    const onChainChanged = (cid: string) => {
+      setChainId(Number(cid));
+    };
+
+    eth?.on?.("accountsChanged", onAccountsChanged);
+    eth?.on?.("chainChanged", onChainChanged);
+
+    return () => {
+      eth?.removeListener?.("accountsChanged", onAccountsChanged);
+      eth?.removeListener?.("chainChanged", onChainChanged);
+    };
   }, []);
 
-  return { readWs, readHttp, write };
+  return { readWs, readHttp, write, account, setAccount, chainId, setChainId };
 }
 
 export default function App() {
-  const { readWs, readHttp, write } = useProviders();
-
-  // wallet
-  const [account, setAccount] = useState<string>("");
-  const [chainId, setChainId] = useState<number>();
+  const { readWs, readHttp, write, account, setAccount, chainId, setChainId } = useProviders();
 
   // providers chosen
   const [readProviderName, setReadProviderName] = useState<string>("(unused)");
   const read = readWs ?? readHttp;
   useEffect(() => {
-    sdk.actions.ready(); // içerik görünür, splash gizlenir
+    sdk.actions.ready(); // splash -> hidden
     setReadProviderName(readWs ? "WSS" : (readHttp ? "HTTP" : "(none)"));
     if (!readWs && !readHttp) console.error("No RPC providers configured.");
   }, [readWs, readHttp]);
@@ -184,7 +220,6 @@ export default function App() {
     ts: number;
   };
   const [lastPayout, setLastPayout] = useState<PayoutInfo | null>(null);
-
 
   // diagnostics
   const [latestBlock, setLatestBlock] = useState<number>(0);
@@ -256,23 +291,25 @@ export default function App() {
     return () => { stop = true; };
   }, [read, readWs]);
 
-  // ===== Wallet connect (with mobile deep-link fallback) =====
+  // ===== Wallet connect (universal) =====
   const connect = async () => {
-    const eth = (window as any).ethereum;
-    const isMobile = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
-    if (eth) {
+    const eth = getUniversalEip1193();
+    const isMobile = isMobileUA();
+
+    if (eth?.request) {
       try {
-        const provider = new BrowserProvider(eth);
-        const accs = await provider.send("eth_requestAccounts", []);
-        setAccount(accs[0]);
-        const net = await provider.getNetwork();
-        setChainId(Number(net.chainId));
+        const accs = await eth.request({ method: "eth_requestAccounts" });
+        setAccount(Array.isArray(accs) && accs.length ? accs[0] : "");
+        const cid = await eth.request({ method: "eth_chainId" });
+        if (cid) setChainId(Number(cid));
         return;
       } catch (e:any) {
         alert(e?.message ?? "Wallet connection failed");
         return;
       }
     }
+
+    // no provider -> mobile deep-link fallback
     if (isMobile) {
       const dapp = location.href.replace(/^https?:\/\//, "");
       const metamask = `https://metamask.app.link/dapp/${dapp}`;
@@ -321,9 +358,6 @@ export default function App() {
     } as PayoutInfo;
   }
 
-  
-
-
   // shared pull
   const pullOnce = async () => {
     if (!bingo || pulling.current) return;
@@ -348,26 +382,24 @@ export default function App() {
         const r = (await bingo.roundInfo(rid)) as unknown as RoundInfo;
         setRound(r);
 
-        // round finalized ise ve winner var ise, payout event'ini yakala (ilk yüklemede/refresh'te)
-          try {
-            if (r.finalized && r.winner && r.winner !== "0x0000000000000000000000000000000000000000") {
-              if (!lastPayout || lastPayout.roundId !== Number(rid)) {
-                const p = await fetchLatestPayout(Number(rid));
-                if (p) setLastPayout(p);
-                else {
-                  // event WSS ile yakalanmamış olabilir; yine de minimal bilgi göster
-                  setLastPayout({
-                    roundId: Number(rid),
-                    winner: r.winner,
-                    winnerUSDC: r.prizePoolUSDC, // pool tamamı winner'a
-                    feeUSDC: 0n,
-                    tx: undefined,
-                    ts: Date.now(),
-                  });
-                }
+        try {
+          if (r.finalized && r.winner && r.winner !== "0x0000000000000000000000000000000000000000") {
+            if (!lastPayout || lastPayout.roundId !== Number(rid)) {
+              const p = await fetchLatestPayout(Number(rid));
+              if (p) setLastPayout(p);
+              else {
+                setLastPayout({
+                  roundId: Number(rid),
+                  winner: r.winner,
+                  winnerUSDC: r.prizePoolUSDC,
+                  feeUSDC: 0n,
+                  tx: undefined,
+                  ts: Date.now(),
+                });
               }
             }
-          } catch {}
+          }
+        } catch {}
 
         if (Number(r.drawCount) > 0 && lastDrawn === undefined) {
           try {
@@ -454,7 +486,7 @@ export default function App() {
     (events as any).on("VRFFulfilled", onAny);
     (events as any).on("RoundCreated", onAny);
     (events as any).on("Payout", onAny);
-     (events as any).on("Payout", onPayout);
+    (events as any).on("Payout", onPayout);
 
     return () => {
       (events as any).off("Draw", onDraw);
@@ -485,24 +517,20 @@ export default function App() {
     } finally { setLoadingTx(""); }
   };
 
-      const onPayout = async (_roundId: any, winner: string, winnerUSDC: bigint, feeUSDC: bigint, ev: any) => {
-      try {
-        const txHash: string | undefined = ev?.log?.transactionHash || ev?.transactionHash;
-        setLastPayout({
-          roundId: Number(_roundId),
-          winner: String(winner),
-          winnerUSDC: BigInt(winnerUSDC),
-          feeUSDC: BigInt(feeUSDC),
-          tx: txHash,
-          ts: Date.now(),
-        });
-      } catch {}
-      await pullOnce();
-    };
-
-   
-
-   
+  const onPayout = async (_roundId: any, winner: string, winnerUSDC: bigint, feeUSDC: bigint, ev: any) => {
+    try {
+      const txHash: string | undefined = ev?.log?.transactionHash || ev?.transactionHash;
+      setLastPayout({
+        roundId: Number(_roundId),
+        winner: String(winner),
+        winnerUSDC: BigInt(winnerUSDC),
+        feeUSDC: BigInt(feeUSDC),
+        tx: txHash,
+        ts: Date.now(),
+      });
+    } catch {}
+    await pullOnce();
+  };
 
   const doJoin = async () => {
     if (!bingo || !round || currentRoundId === 0) return;
@@ -595,7 +623,6 @@ export default function App() {
       pgRaf.current = null;
     };
   }, []);
-  // =========================================================
 
   // Set tab title + favicon
   useEffect(() => {
@@ -697,8 +724,6 @@ export default function App() {
 
       <Header />
 
- 
-
       {/* ===== PROMO BANNER ===== */}
       <section className="bb-banner" role="region" aria-label="BingoBase promo" style={{margin:"18px 0", position:"relative", zIndex:1}}>
         <style>{`
@@ -715,15 +740,13 @@ export default function App() {
           .bb-banner__logo-wrap{display:flex;align-items:center;justify-content:center; margin-left:-24px;}
           .bb-banner__inner{ min-height:220px; }
           .bb-banner__logo{ height:320px; }    /* senin satırın: korunuyor */
-          /* ==== LOGO: 2x büyütme + 2x hız + 2x genlik ==== */
           .bb-banner__logo{
-            width:240px; /* 120px -> 240px (2x) */
+            width:240px;
             height:auto;
             filter:drop-shadow(0 10px 30px rgba(0,0,0,.45));
-            animation: bb-pop .6s ease-out both, bb-breathe 2.25s ease-in-out infinite; /* 4.5s -> 2.25s (2x hız) */
+            animation: bb-pop .6s ease-out both, bb-breathe 2.25s ease-in-out infinite;
           }
           @keyframes bb-pop{from{transform:scale(.8);opacity:0} to{transform:scale(1);opacity:1}}
-          /* Genlik 4px -> 8px (2x hareket) */
           @keyframes bb-breathe{0%,100%{transform:translateY(0)}50%{transform:translateY(-8px)}}
 
           .bb-banner__body{display:grid;gap:14px}
@@ -773,15 +796,11 @@ export default function App() {
           }
           @media (max-width:620px){
             .bb-banner__inner{grid-template-columns:1fr; text-align:center}
-            .bb-banner__logo{width:92px;margin:0 auto} /* mobil davranışı korunuyor */
+            .bb-banner__logo{width:92px;margin:0 auto}
             .bb-cta{justify-content:center}
             .bb-counters{justify-content:center}
           }
         `}</style>
-
-
-
-      
 
         <div className="bb-lines" aria-hidden="true"></div>
 
@@ -799,7 +818,6 @@ export default function App() {
               An on-chain, provably random Bingo powered by Chainlink VRF v2.5. <br />
               <strong>Each game means at least 100 transactions on Base.</strong> <br />
               contact: fractaliaio@gmail.com
-
             </p>
 
             <div className="bb-points">
@@ -810,7 +828,6 @@ export default function App() {
             </div>
 
             <div className="bb-cta">
-              {/* REPLACED: Play Now link -> smart Join button */}
               <button className="bb-btn" onClick={onBannerClick} disabled={loadingTx !== ""}>
                 {bannerCtaLabel}
               </button>
@@ -833,7 +850,7 @@ export default function App() {
       </section>
       {/* ===== /PROMO BANNER ===== */}
 
-               <div style={{ display: "flex", justifyContent: "flex-end", marginTop: -6, marginBottom: 12, position:"relative", zIndex:1 }}>
+      <div style={{ display: "flex", justifyContent: "flex-end", marginTop: -6, marginBottom: 12, position:"relative", zIndex:1 }}>
         {account ? (
           <code
             className="no-select"
@@ -856,53 +873,53 @@ export default function App() {
       <TopBar chainId={chainId} account={account} onConnect={connect} />
 
       {/* WINNER / PAYOUT DUYURUSU */}
-{lastPayout && (
-  <div
-    role="status"
-    style={{
-      position: "relative",
-      zIndex: 2,
-      margin: "8px 0 12px",
-      padding: "12px 14px",
-      borderRadius: 12,
-      background: "linear-gradient(180deg, rgba(0,200,83,.12), rgba(0,0,0,.06))",
-      border: `1px solid ${CARD_BORDER}`,
-      color: THEME_TEXT,
-      boxShadow: "0 8px 24px rgba(0,0,0,.25)"
-    }}
-  >
-    <div style={{display:"flex", alignItems:"center", gap:10, flexWrap:"wrap"}}>
-      <span style={{
-        width:10, height:10, borderRadius:6, background: ACTIVE_GREEN,
-        display:"inline-block", boxShadow:"0 0 12px rgba(0,200,83,.6)"
-      }} />
-      <strong style={{fontWeight:800}}>Winner announced!</strong>
-      <span style={{opacity:.9}}>
-        Round <b>#{lastPayout.roundId}</b> —{" "}
-        <a
-          href={`${EXPLORER}/address/${lastPayout.winner}`}
-          target="_blank" rel="noreferrer"
-          style={{color:"#9ecbff", fontWeight:700}}
+      {lastPayout && (
+        <div
+          role="status"
+          style={{
+            position: "relative",
+            zIndex: 2,
+            margin: "8px 0 12px",
+            padding: "12px 14px",
+            borderRadius: 12,
+            background: "linear-gradient(180deg, rgba(0,200,83,.12), rgba(0,0,0,.06))",
+            border: `1px solid ${CARD_BORDER}`,
+            color: THEME_TEXT,
+            boxShadow: "0 8px 24px rgba(0,0,0,.25)"
+          }}
         >
-          {lastPayout.winner.slice(0,6)}…{lastPayout.winner.slice(-4)}
-        </a>{" "}
-        received{" "}
-        <b>{Number(formatUnits(lastPayout.winnerUSDC, decimals)).toFixed(2)} {symbol}</b>.
-      </span>
-      {lastPayout.tx ? (
-        <a
-          href={`${EXPLORER}/tx/${lastPayout.tx}`}
-          target="_blank" rel="noreferrer"
-          style={{marginLeft:8, color:"#9ecbff", fontWeight:700}}
-        >
-          View payout tx →
-        </a>
-      ) : (
-        <span style={{marginLeft:8, color:THEME_MUTED}}>(tx pending)</span>
+          <div style={{display:"flex", alignItems:"center", gap:10, flexWrap:"wrap"}}>
+            <span style={{
+              width:10, height:10, borderRadius:6, background: ACTIVE_GREEN,
+              display:"inline-block", boxShadow:"0 0 12px rgba(0,200,83,.6)"
+            }} />
+            <strong style={{fontWeight:800}}>Winner announced!</strong>
+            <span style={{opacity:.9}}>
+              Round <b>#{lastPayout.roundId}</b> —{" "}
+              <a
+                href={`${EXPLORER}/address/${lastPayout.winner}`}
+                target="_blank" rel="noreferrer"
+                style={{color:"#9ecbff", fontWeight:700}}
+              >
+                {lastPayout.winner.slice(0,6)}…{lastPayout.winner.slice(-4)}
+              </a>{" "}
+              received{" "}
+              <b>{Number(formatUnits(lastPayout.winnerUSDC, decimals)).toFixed(2)} {symbol}</b>.
+            </span>
+            {lastPayout.tx ? (
+              <a
+                href={`${EXPLORER}/tx/${lastPayout.tx}`}
+                target="_blank" rel="noreferrer"
+                style={{marginLeft:8, color:"#9ecbff", fontWeight:700}}
+              >
+                View payout tx →
+              </a>
+            ) : (
+              <span style={{marginLeft:8, color:THEME_MUTED}}>(tx pending)</span>
+            )}
+          </div>
+        </div>
       )}
-    </div>
-  </div>
-)}
 
       {diag.msg && (
         <div style={{background:"#2a1515", border:`1px solid ${CARD_BORDER}`, padding:12, borderRadius:10, marginBottom:12, color:THEME_TEXT}}>
@@ -1013,26 +1030,26 @@ export default function App() {
         </div>
       </section>
 
-     <footer
-          style={{
-            position: "relative",
-            zIndex: 2,                 // global bg'nin üstünde kalsın
-            margin: "32px 0",
-            paddingBottom: 24,         // sayfa sonuna yapışmasın
-            textAlign: "center",       // istersen sola alabilirsin
-            fontSize: 12,
-            color: THEME_MUTED,
-          }}
-        >
-          Contract:{" "}
-          <a href={`${EXPLORER}/address/${CONTRACT_ADDRESS}`} target="_blank" rel="noreferrer">
-            {CONTRACT_ADDRESS}
-          </a>{" "}
-          · USDC:{" "}
-          <a href={`${EXPLORER}/address/${USDC_ADDRESS}`} target="_blank" rel="noreferrer">
-            {USDC_ADDRESS}
-          </a>
-        </footer>
+      <footer
+        style={{
+          position: "relative",
+          zIndex: 2,
+          margin: "32px 0",
+          paddingBottom: 24,
+          textAlign: "center",
+          fontSize: 12,
+          color: THEME_MUTED,
+        }}
+      >
+        Contract:{" "}
+        <a href={`${EXPLORER}/address/${CONTRACT_ADDRESS}`} target="_blank" rel="noreferrer">
+          {CONTRACT_ADDRESS}
+        </a>{" "}
+        · USDC:{" "}
+        <a href={`${EXPLORER}/address/${USDC_ADDRESS}`} target="_blank" rel="noreferrer">
+          {USDC_ADDRESS}
+        </a>
+      </footer>
     </div>
   );
 }
@@ -1042,7 +1059,7 @@ function Header() {
   return (
     <div style={{ padding: "8px 0 0" }}>
       <div style={{display:"flex", justifyContent:"center"}}>
-        {/* <img src="/BingoBase4.png" alt="logo" style={{ height: 144, filter:"drop-shadow(0 6px 20px rgba(0,0,0,.6))" }} /> */}
+        {/* logo optional */}
       </div>
     </div>
   );
@@ -1257,7 +1274,7 @@ function ChatPanel({ account }:{ account?: string }) {
         <h3 style={{ margin: 0, fontSize: 18, color: THEME_TEXT }}>Global Chat</h3>
         <div style={{ display:"flex", alignItems:"center", gap:8 }}>
           <span style={{ width:10, height:10, borderRadius:5, background: dot, display:"inline-block" }} />
-          <div style={{ fontSize:12, color:THEME_MUTED }}>You: {user}</div>
+          <div style={{ fontSize:12, color: THEME_MUTED }}>You: {user}</div>
         </div>
       </div>
       <div ref={listRef} style={{height: 420, overflowY: "auto", display:"flex", flexDirection:"column", gap:8, paddingRight:4}}>
@@ -1297,10 +1314,10 @@ const styles: Record<string, React.CSSProperties> = {
     margin: "24px auto",
     padding: "0 24px",
     fontFamily: "Inter, system-ui, Arial",
-    background: "transparent", // global bg altta
+    background: "transparent",
     color: THEME_TEXT,
     position: "relative",
-    zIndex: 1, // global bg'nin üstünde
+    zIndex: 1,
   },
   columns: {
     display: "grid",
