@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { sdk } from "@farcaster/miniapp-sdk";
 
 import {
@@ -101,15 +101,37 @@ type RoundInfo = {
 };
 
 // ---- Universal EIP-1193 Provider discovery ----
-function getUniversalEip1193(): any | null {
+async function getMiniAppProvider(): Promise<any | null> {
   try {
-    const evmFromSDK = sdk?.wallet?.getEthereumProvider?.();
-    if (evmFromSDK) return evmFromSDK;        // Base App Mini App ortamı
-  } catch {}
-  if (typeof window !== "undefined" && (window as any).ethereum) {
-    return (window as any).ethereum;          // Chrome/MetaMask vb.
-  }
-  return null;
+    const isMini = await sdk.isInMiniApp?.();
+    if (!isMini) return null;
+    const p = sdk.wallet?.getEthereumProvider?.();
+    return p || null;
+  } catch { return null; }
+}
+
+function pickInjectedProvider(eth: any): any {
+  const list = Array.isArray(eth?.providers) ? eth.providers : [eth].filter(Boolean);
+  const by = (key: string) => list.find((p: any) => p?.[key]);
+  return by("isMetaMask") || by("isCoinbaseWallet") || list[0] || null;
+}
+
+function waitForInjectedEthereum(timeoutMs = 2000): Promise<any | null> {
+  return new Promise((resolve) => {
+    const existing = (window as any).ethereum;
+    if (existing) return resolve(pickInjectedProvider(existing));
+
+    let done = false;
+    const finish = (val: any) => { if (!done) { done = true; resolve(val); } };
+
+    const onInit = () => finish(pickInjectedProvider((window as any).ethereum));
+    window.addEventListener("ethereum#initialized", onInit as any, { once: true } as any);
+
+    setTimeout(() => {
+      window.removeEventListener("ethereum#initialized", onInit as any);
+      finish((window as any).ethereum ? pickInjectedProvider((window as any).ethereum) : null);
+    }, timeoutMs);
+  });
 }
 
 function isMobileUA() {
@@ -131,43 +153,40 @@ function useProviders() {
   const [chainId, setChainId] = useState<number | undefined>(undefined);
 
   useEffect(() => {
-    const eth = getUniversalEip1193();
+    (async () => {
+      // 1) Mini-app içindeyse sadece SDK provider
+      const miniProv = await getMiniAppProvider();
+      let eip1193: any | null = null;
 
-    // create BrowserProvider once
-    try {
-      if (eth) setWrite(new BrowserProvider(eth));
-    } catch (e) {
-      console.warn("BrowserProvider init failed:", e);
-    }
+      if (miniProv) {
+        eip1193 = miniProv;
+      } else {
+        // 2) Web/Chrome: injected provider'ı bekle/ayıklama
+        eip1193 = await waitForInjectedEthereum(2000);
+      }
 
-    // initialize state (no reloads)
-    const init = async () => {
-      try {
-        if (!eth?.request) return;
-        const accs = await eth.request({ method: "eth_accounts" });
-        if (Array.isArray(accs) && accs.length > 0) setAccount(accs[0]);
-        const cid = await eth.request({ method: "eth_chainId" });
-        if (cid) setChainId(Number(cid));
-      } catch {}
-    };
-    init();
-
-    // listen changes – update state instead of reloading
-    const onAccountsChanged = (accs: string[]) => {
-      const a = Array.isArray(accs) && accs.length ? accs[0] : "";
-      setAccount(a);
-    };
-    const onChainChanged = (cid: string) => {
-      setChainId(Number(cid));
-    };
-
-    eth?.on?.("accountsChanged", onAccountsChanged);
-    eth?.on?.("chainChanged", onChainChanged);
-
-    return () => {
-      eth?.removeListener?.("accountsChanged", onAccountsChanged);
-      eth?.removeListener?.("chainChanged", onChainChanged);
-    };
+      if (eip1193) {
+        try {
+          setWrite(new BrowserProvider(eip1193));
+          // başlangıç durumu
+          const accs = await eip1193.request?.({ method: "eth_accounts" }).catch(() => []);
+          if (Array.isArray(accs) && accs.length) setAccount(accs[0]);
+          const cid = await eip1193.request?.({ method: "eth_chainId" }).catch(() => null);
+          if (cid) setChainId(Number(cid));
+          // eventler
+          const onAcc = (accs: string[]) => setAccount(Array.isArray(accs) && accs.length ? accs[0] : "");
+          const onCid = (cid: string) => setChainId(Number(cid));
+          eip1193.on?.("accountsChanged", onAcc);
+          eip1193.on?.("chainChanged", onCid);
+          return () => {
+            eip1193.removeListener?.("accountsChanged", onAcc);
+            eip1193.removeListener?.("chainChanged", onCid);
+          };
+        } catch (e) {
+          console.warn("BrowserProvider init failed:", e);
+        }
+      }
+    })();
   }, []);
 
   return { readWs, readHttp, write, account, setAccount, chainId, setChainId };
@@ -291,41 +310,7 @@ export default function App() {
     return () => { stop = true; };
   }, [read, readWs]);
 
-  // ===== Wallet connect (universal) =====
-  const connect = async () => {
-    const eth = getUniversalEip1193();
-    const isMobile = isMobileUA();
-
-    if (eth?.request) {
-      try {
-        const accs = await eth.request({ method: "eth_requestAccounts" });
-        setAccount(Array.isArray(accs) && accs.length ? accs[0] : "");
-        const cid = await eth.request({ method: "eth_chainId" });
-        if (cid) setChainId(Number(cid));
-        return;
-      } catch (e:any) {
-        alert(e?.message ?? "Wallet connection failed");
-        return;
-      }
-    }
-
-    // no provider -> mobile deep-link fallback
-    if (isMobile) {
-      const dapp = location.href.replace(/^https?:\/\//, "");
-      const metamask = `https://metamask.app.link/dapp/${dapp}`;
-      const baseWallet = `https://go.cb-w.com/dapp?cb_url=${encodeURIComponent(location.href)}`;
-      try {
-        window.open(metamask, "_self");
-        setTimeout(() => window.open(baseWallet, "_self"), 1200);
-      } catch {
-        location.href = metamask;
-      }
-    } else {
-      alert("No wallet detected. Please install MetaMask or use a mobile wallet browser.");
-    }
-  };
-
-  // helper: read latest Draw logs to seed feed/lastDrawn on load
+  // ===== helper: read latest Draw logs to seed feed/lastDrawn on load
   async function fetchLatestDraws(ridN: number, take = 5) {
     if (!bingo || !read) return [];
     const fromBlock = Math.max(0, (latestBlock || 0) - LAST_LOG_LOOKBACK);
@@ -358,8 +343,8 @@ export default function App() {
     } as PayoutInfo;
   }
 
-  // shared pull
-  const pullOnce = async () => {
+  // ===== shared pull (stable ref)
+  const pullOnce = useCallback(async () => {
     if (!bingo || pulling.current) return;
     pulling.current = true;
     try {
@@ -382,6 +367,7 @@ export default function App() {
         const r = (await bingo.roundInfo(rid)) as unknown as RoundInfo;
         setRound(r);
 
+        // round finalized ise ve winner var ise, payout event'ini yakala
         try {
           if (r.finalized && r.winner && r.winner !== "0x0000000000000000000000000000000000000000") {
             if (!lastPayout || lastPayout.roundId !== Number(rid)) {
@@ -452,7 +438,7 @@ export default function App() {
     } finally {
       pulling.current = false;
     }
-  };
+  }, [bingo, usdc, account, lastPayout, lastDrawn, latestBlock]);
 
   // polling loop
   useEffect(() => {
@@ -463,9 +449,70 @@ export default function App() {
     };
     loop();
     return () => window.clearTimeout(t);
-  }, [bingo, usdc, account]);
+  }, [pullOnce]);
 
-  // event subscriptions (WSS only)
+  // ===== Wallet connect (universal) =====
+  const connect = async () => {
+    // Mini-app: yalnızca SDK provider
+    const miniProv = await getMiniAppProvider();
+    if (miniProv) {
+      try {
+        const accs = await miniProv.request({ method: "eth_requestAccounts" });
+        setAccount(Array.isArray(accs) && accs.length ? accs[0] : "");
+        const cid = await miniProv.request({ method: "eth_chainId" });
+        if (cid) setChainId(Number(cid));
+      } catch (e:any) {
+        alert(e?.message ?? "Wallet connection failed");
+      }
+      return;
+    }
+
+    // Web
+    const injected = await waitForInjectedEthereum(2000);
+    if (injected?.request) {
+      try {
+        const accs = await injected.request({ method: "eth_requestAccounts" });
+        setAccount(Array.isArray(accs) && accs.length ? accs[0] : "");
+        const cid = await injected.request({ method: "eth_chainId" });
+        if (cid) setChainId(Number(cid));
+      } catch (e:any) {
+        alert(e?.message ?? "Wallet connection failed");
+      }
+      return;
+    }
+
+    // Provider yok → yalnızca mobile’da deep-link
+    if (isMobileUA()) {
+      const dapp = location.href.replace(/^https?:\/\//, "");
+      const metamask = `https://metamask.app.link/dapp/${dapp}`;
+      const baseWallet = `https://go.cb-w.com/dapp?cb_url=${encodeURIComponent(location.href)}`;
+      try {
+        window.open(metamask, "_self");
+        setTimeout(() => window.open(baseWallet, "_self"), 1200);
+      } catch {
+        location.href = metamask;
+      }
+    } else {
+      alert("No wallet detected. Please install MetaMask or use a mobile wallet browser.");
+    }
+  };
+
+  // ===== Event subscriptions (WSS only) =====
+  const onPayout = useCallback(async (_roundId: any, winner: string, winnerUSDC: bigint, feeUSDC: bigint, ev: any) => {
+    try {
+      const txHash: string | undefined = ev?.log?.transactionHash || ev?.transactionHash;
+      setLastPayout({
+        roundId: Number(_roundId),
+        winner: String(winner),
+        winnerUSDC: BigInt(winnerUSDC),
+        feeUSDC: BigInt(feeUSDC),
+        tx: txHash,
+        ts: Date.now(),
+      });
+    } catch {}
+    await pullOnce();
+  }, [pullOnce]);
+
   useEffect(() => {
     if (!events) return;
 
@@ -480,22 +527,21 @@ export default function App() {
       }
       await pullOnce();
     };
-    const onAny = async (..._args: any[]) => { await pullOnce(); };
+
+    const onAny = async () => { await pullOnce(); };
 
     (events as any).on("Draw", onDraw);
     (events as any).on("VRFFulfilled", onAny);
     (events as any).on("RoundCreated", onAny);
-    (events as any).on("Payout", onAny);
-    (events as any).on("Payout", onPayout);
+    (events as any).on("Payout", onPayout);   // ← sadece bir payout handler
 
     return () => {
       (events as any).off("Draw", onDraw);
       (events as any).off("VRFFulfilled", onAny);
       (events as any).off("RoundCreated", onAny);
-      (events as any).off("Payout", onAny);
       (events as any).off("Payout", onPayout);
     };
-  }, [events]);
+  }, [events, onPayout, pullOnce]);
 
   // signer helper
   const withSigner = async (c: Contract) => {
@@ -515,21 +561,6 @@ export default function App() {
     } catch (e:any) {
       alert(e?.shortMessage ?? e?.message ?? "Approve failed");
     } finally { setLoadingTx(""); }
-  };
-
-  const onPayout = async (_roundId: any, winner: string, winnerUSDC: bigint, feeUSDC: bigint, ev: any) => {
-    try {
-      const txHash: string | undefined = ev?.log?.transactionHash || ev?.transactionHash;
-      setLastPayout({
-        roundId: Number(_roundId),
-        winner: String(winner),
-        winnerUSDC: BigInt(winnerUSDC),
-        feeUSDC: BigInt(feeUSDC),
-        tx: txHash,
-        ts: Date.now(),
-      });
-    } catch {}
-    await pullOnce();
   };
 
   const doJoin = async () => {
@@ -739,7 +770,7 @@ export default function App() {
           .bb-banner__inner{max-width:1100px;margin:0 auto;display:grid;gap:18px;grid-template-columns:120px 1fr;align-items:center}
           .bb-banner__logo-wrap{display:flex;align-items:center;justify-content:center; margin-left:-24px;}
           .bb-banner__inner{ min-height:220px; }
-          .bb-banner__logo{ height:320px; }    /* senin satırın: korunuyor */
+          .bb-banner__logo{ height:320px; }
           .bb-banner__logo{
             width:240px;
             height:auto;
@@ -1059,7 +1090,7 @@ function Header() {
   return (
     <div style={{ padding: "8px 0 0" }}>
       <div style={{display:"flex", justifyContent:"center"}}>
-        {/* logo optional */}
+        {/* optional logo */}
       </div>
     </div>
   );
@@ -1274,7 +1305,7 @@ function ChatPanel({ account }:{ account?: string }) {
         <h3 style={{ margin: 0, fontSize: 18, color: THEME_TEXT }}>Global Chat</h3>
         <div style={{ display:"flex", alignItems:"center", gap:8 }}>
           <span style={{ width:10, height:10, borderRadius:5, background: dot, display:"inline-block" }} />
-          <div style={{ fontSize:12, color: THEME_MUTED }}>You: {user}</div>
+          <div style={{ fontSize:12, color:THEME_MUTED }}>You: {user}</div>
         </div>
       </div>
       <div ref={listRef} style={{height: 420, overflowY: "auto", display:"flex", flexDirection:"column", gap:8, paddingRight:4}}>
@@ -1285,8 +1316,8 @@ function ChatPanel({ account }:{ account?: string }) {
               {m.from.slice(-2)}
             </div>
             <div>
-              <div style={{fontSize:12, color: THEME_MUTED}}>{m.from} • {new Date(m.ts).toLocaleTimeString()}</div>
-              <div style={{fontWeight:600, color: THEME_TEXT, wordBreak:"break-word"}}>{m.text}</div>
+              <div style={{fontSize:12, color:THEME_MUTED}}>{m.from} • {new Date(m.ts).toLocaleTimeString()}</div>
+              <div style={{fontWeight:600, color:THEME_TEXT, wordBreak:"break-word"}}>{m.text}</div>
             </div>
           </div>
         ))}
