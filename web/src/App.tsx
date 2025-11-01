@@ -1207,46 +1207,21 @@ function Ball({ n, active = false }: { n: number; active?: boolean }) {
 
 // ===== Chat Panel (GLOBAL) =====
 function ChatPanel({ account }:{ account?: string }) {
+  // nick formatını sabitle: cüzdan varsa :abcd, yoksa :anon
+  const nick = (account ? account.toLowerCase() : ':anon');
+
   type Msg = { id: string; from: string; text: string; ts: number; clientId?: string };
 
-  // ---- nick / label
-  const nick = useMemo(
-    () => (account ? account.toLowerCase() : ":anon"),
-    [account]
-  );
-  const youLabel = useMemo(
-    () => (account ? `${account.slice(0,6)}…${account.slice(-4)}` : "anon"),
-    [account]
-  );
-
-  // state
   const [msgs, setMsgs] = useState<Msg[]>([]);
   const [text, setText] = useState("");
   const [status, setStatus] = useState<"disconnected"|"connecting"|"connected">("disconnected");
 
-  // refs
   const wsRef = useRef<WebSocket | null>(null);
   const listRef = useRef<HTMLDivElement | null>(null);
   const retryRef = useRef<number>(0);
   const lastSendRef = useRef<number>(0);
 
-  // ---- cache: load once on mount
-  useEffect(() => {
-    try {
-      const raw = localStorage.getItem("bb_chat_cache");
-      if (raw) {
-        const arr: Msg[] = JSON.parse(raw);
-        if (Array.isArray(arr)) {
-          // id'ye göre normalize
-          const uniq = new Map<string, Msg>();
-          for (const m of arr) if (m?.id) uniq.set(m.id, m);
-          setMsgs(Array.from(uniq.values()).sort((a,b)=>a.ts-b.ts).slice(-300));
-        }
-      }
-    } catch {}
-  }, []);
-
-  // ---- cache write + autoscroll
+  // ---- cache + autoscroll
   useEffect(() => {
     if (msgs.length) {
       try { localStorage.setItem("bb_chat_cache", JSON.stringify(msgs.slice(-300))); } catch {}
@@ -1254,7 +1229,7 @@ function ChatPanel({ account }:{ account?: string }) {
     if (listRef.current) listRef.current.scrollTop = listRef.current.scrollHeight;
   }, [msgs]);
 
-  // ---- WebSocket connect: ONLY ONCE
+  // ---- connect once
   useEffect(() => {
     let stop = false;
     if (!CHAT_WSS) return;
@@ -1269,7 +1244,7 @@ function ChatPanel({ account }:{ account?: string }) {
         ws.onopen = () => {
           setStatus("connected");
           retryRef.current = 0;
-          // ilk bağlandığında mevcut nick’i bildir
+          // ilk join (anon olabilir)
           try { ws.send(JSON.stringify({ type: "join", from: nick })); } catch {}
         };
 
@@ -1278,7 +1253,6 @@ function ChatPanel({ account }:{ account?: string }) {
             const data = JSON.parse(ev.data);
 
             if (data?.type === "history" && Array.isArray(data.items)) {
-              // sunucudan gelen history ile eldeki listeyi merge et (id'ye göre)
               const incoming: Msg[] = data.items.map((d:any) => ({
                 id: String(d.id || crypto.randomUUID()),
                 from: String(d.from || ":anon"),
@@ -1290,7 +1264,7 @@ function ChatPanel({ account }:{ account?: string }) {
               setMsgs(prev => {
                 const uniq = new Map<string, Msg>();
                 for (const m of prev) uniq.set(m.id, m);
-                for (const m of incoming) uniq.set(m.id, m); // id çakışırsa gelen history üstün
+                for (const m of incoming) uniq.set(m.id, m);
                 return Array.from(uniq.values()).sort((a,b)=>a.ts-b.ts).slice(-300);
               });
               return;
@@ -1305,11 +1279,30 @@ function ChatPanel({ account }:{ account?: string }) {
                 clientId: data.clientId ? String(data.clientId) : undefined,
               };
 
-              // 1) id'ye göre dupe koruması
-              // 2) ek olarak optimistic clientId eşleşirse de ekleme (çiftlemeyi önle)
               setMsgs(prev => {
+                // 1) optimistic replace: clientId eşleşirse yer değiştirme
+                if (incoming.clientId) {
+                  const idx = prev.findIndex(x => x.clientId === incoming.clientId);
+                  if (idx !== -1) {
+                    const copy = prev.slice();
+                    copy[idx] = incoming;
+                    return copy;
+                  }
+                }
+
+                // 2) id dupe koruması
                 if (prev.some(x => x.id === incoming.id)) return prev;
-                if (incoming.clientId && prev.some(x => x.clientId === incoming.clientId)) return prev;
+
+                // 3) heüristik: aynı kullanıcı + aynı metin + 1500ms içinde
+                let nearDup = false;
+                for (let i = prev.length - 1; i >= 0 && i >= prev.length - 10; i--) {
+                  const x = prev[i];
+                  if (x.from === incoming.from && x.text === incoming.text && Math.abs(incoming.ts - x.ts) < 1500) {
+                    nearDup = true; break;
+                  }
+                }
+                if (nearDup) return prev;
+
                 return [...prev, incoming];
               });
               return;
@@ -1336,10 +1329,11 @@ function ChatPanel({ account }:{ account?: string }) {
 
     connectWs();
     return () => { stop = true; try { wsRef.current?.close(); } catch {} };
-  // ⛔ bağlanma döngüsü account'a bağlı değil!
-  }, []); 
+    // sadece bir kez
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
-  // ---- account değişince sadece JOIN gönder (yeniden bağlama yok)
+  // ---- account değişince nick’i güncelle
   useEffect(() => {
     try { wsRef.current?.send(JSON.stringify({ type: "join", from: nick })); } catch {}
   }, [nick]);
@@ -1348,20 +1342,26 @@ function ChatPanel({ account }:{ account?: string }) {
   const send = () => {
     const trimmed = text.replace(/\s+/g, " ").trim();
     if (!trimmed) return;
+
     const now = Date.now();
     if (now - lastSendRef.current < 400) return; // küçük rate limit
     lastSendRef.current = now;
 
+    // optimistic
     const clientId = crypto.randomUUID();
     const safe = trimmed.slice(0, 280);
-
-    // optimistic
-    const optimistic: Msg = { id: `local:${clientId}`, clientId, from: nick, text: safe, ts: now };
-    setMsgs((x) => [...x, optimistic]);
+    const optimistic: Msg = { id: `local-${clientId}`, from: nick, text: safe, ts: now, clientId };
+    setMsgs(x => [...x, optimistic]);
     setText("");
 
     if (wsRef.current && wsRef.current.readyState === 1) {
-      wsRef.current.send(JSON.stringify({ type: "msg", from: nick, text: safe, ts: now, id: undefined, clientId }));
+      wsRef.current.send(JSON.stringify({
+        type: "msg",
+        from: nick,
+        text: safe,
+        ts: now,
+        clientId,   // server bunu geri yollar → optimistic replace
+      }));
     }
   };
 
@@ -1377,7 +1377,7 @@ function ChatPanel({ account }:{ account?: string }) {
         <h3 style={{ margin: 0, fontSize: 18, color: THEME_TEXT }}>Global Chat</h3>
         <div style={{ display:"flex", alignItems:"center", gap:8 }}>
           <span style={{ width:10, height:10, borderRadius:5, background: dot, display:"inline-block" }} />
-          <div style={{ fontSize:12, color:THEME_MUTED }}>You: {youLabel}</div>
+          <div style={{ fontSize:12, color: THEME_MUTED }}>You: {nick}</div>
         </div>
       </div>
 
@@ -1386,11 +1386,15 @@ function ChatPanel({ account }:{ account?: string }) {
         {msgs.map(m => (
           <div key={m.id} style={{ display:"flex", gap:8, alignItems:"flex-start"}}>
             <div style={{width:28, height:28, borderRadius:14, background: CHIP_BG, border:`1px solid ${CARD_BORDER}`, display:"flex", alignItems:"center", justifyContent:"center", fontSize:12, color: THEME_TEXT}}>
-              {String(m.from || ":").slice(-2)}
+              {m.from.slice(-2)}
             </div>
             <div>
-              <div style={{fontSize:12, color:THEME_MUTED}}>{m.from} • {new Date(m.ts).toLocaleTimeString()}</div>
-              <div style={{fontWeight:600, color:THEME_TEXT, wordBreak:"break-word"}}>{m.text}</div>
+              <div style={{fontSize:12, color: THEME_MUTED}}>
+                {m.from} • {new Date(m.ts).toLocaleTimeString()}
+              </div>
+              <div style={{fontWeight:600, color: THEME_TEXT, wordBreak:"break-word"}}>
+                {m.text}
+              </div>
             </div>
           </div>
         ))}
