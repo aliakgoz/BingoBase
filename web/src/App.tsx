@@ -1209,10 +1209,9 @@ function ChatPanel({ account }:{ account?: string }) {
   const last4 = account ? account.slice(-4) : "anon";
   const user = `:${last4}`;
   type Msg = { id: string; from: string; text: string; ts: number };
-  const [msgs, setMsgs] = useState<Msg[]>(() => {
-    const raw = localStorage.getItem("bb_chat_v2");
-    return raw ? JSON.parse(raw) : [];
-  });
+
+  // 1) Başlangıç: boş liste (history sunucudan gelecek)
+  const [msgs, setMsgs] = useState<Msg[]>([]);
   const [text, setText] = useState("");
   const [status, setStatus] = useState<"disconnected"|"connecting"|"connected">("disconnected");
   const wsRef = useRef<WebSocket | null>(null);
@@ -1220,14 +1219,18 @@ function ChatPanel({ account }:{ account?: string }) {
   const retryRef = useRef<number>(0);
   const lastSendRef = useRef<number>(0);
 
+  // İsteğe bağlı: client-side cache (son 300 mesaj)
   useEffect(() => {
-    localStorage.setItem("bb_chat_v2", JSON.stringify(msgs.slice(-300)));
+    if (msgs.length) {
+      localStorage.setItem("bb_chat_cache", JSON.stringify(msgs.slice(-300)));
+    }
     if (listRef.current) listRef.current.scrollTop = listRef.current.scrollHeight;
   }, [msgs]);
 
+  // WebSocket bağlan
   useEffect(() => {
-    if (!CHAT_WSS) return;
     let stop = false;
+    if (!CHAT_WSS) return;
 
     const connectWs = () => {
       if (stop) return;
@@ -1245,14 +1248,36 @@ function ChatPanel({ account }:{ account?: string }) {
         ws.onmessage = (ev) => {
           try {
             const data = JSON.parse(ev.data);
+
+            if (data?.type === "history" && Array.isArray(data.items)) {
+              // 2) İlk açılışta global history'yi yükle
+              const items: Msg[] = data.items.map((d:any) => ({
+                id: String(d.id || crypto.randomUUID()),
+                from: String(d.from || ":anon"),
+                text: String(d.text || "").slice(0, 280),
+                ts: Number(d.ts) || Date.now()
+              }));
+              // dupe/normalize + tarihe göre sırala
+              const uniq = new Map<string, Msg>();
+              for (const m of items) uniq.set(m.id, m);
+              const arr = Array.from(uniq.values()).sort((a,b) => a.ts - b.ts);
+              setMsgs(arr);
+              return;
+            }
+
             if (data?.type === "msg" && typeof data.text === "string") {
               const m: Msg = {
-                id: crypto.randomUUID(),
+                id: String(data.id || crypto.randomUUID()),
                 from: data.from || ":anon",
                 text: String(data.text).slice(0, 280),
                 ts: Number(data.ts) || Date.now()
               };
-              setMsgs((x) => [...x, m]);
+              // 3) Dupe koruması: id bazlı
+              setMsgs(prev => {
+                if (prev.some(x => x.id === m.id)) return prev;
+                return [...prev, m];
+              });
+              return;
             }
           } catch {}
         };
@@ -1282,21 +1307,25 @@ function ChatPanel({ account }:{ account?: string }) {
     const trimmed = text.replace(/\s+/g, " ").trim();
     if (!trimmed) return;
     const now = Date.now();
-    if (now - lastSendRef.current < 500) return;
+    if (now - lastSendRef.current < 400) return; // küçük rate limit
     lastSendRef.current = now;
 
+    // 4) Client tarafında da bir id üretelim (optimistic UI)
+    const clientId = crypto.randomUUID();
     const safe = trimmed.slice(0, 280);
-    const m: Msg = { id: crypto.randomUUID(), from: user, text: safe, ts: now };
+    const m: Msg = { id: clientId, from: user, text: safe, ts: now };
     setMsgs((x) => [...x, m]);
     setText("");
+
     if (wsRef.current && wsRef.current.readyState === 1) {
-      wsRef.current.send(JSON.stringify({ type: "msg", from: user, text: safe, ts: now }));
+      wsRef.current.send(JSON.stringify({ type: "msg", from: user, text: safe, ts: now, id: clientId }));
     }
   };
+
   const onKey = (e: React.KeyboardEvent<HTMLInputElement>) => { if (e.key === "Enter") send(); };
 
   const dot =
-    status === "connected" ? ACTIVE_GREEN :
+    status === "connected" ? "#00C853" :
     status === "connecting" ? "#f6ad55" : "#ef4444";
 
   return (
@@ -1308,6 +1337,7 @@ function ChatPanel({ account }:{ account?: string }) {
           <div style={{ fontSize:12, color:THEME_MUTED }}>You: {user}</div>
         </div>
       </div>
+
       <div ref={listRef} style={{height: 420, overflowY: "auto", display:"flex", flexDirection:"column", gap:8, paddingRight:4}}>
         {msgs.length === 0 && <div style={{ color: THEME_MUTED }}>No messages yet. Be the first!</div>}
         {msgs.map(m => (
@@ -1322,6 +1352,7 @@ function ChatPanel({ account }:{ account?: string }) {
           </div>
         ))}
       </div>
+
       <div style={{display:"flex", gap:8, marginTop:12}}>
         <input
           placeholder={status === "connected" ? "Type a message..." : "Connecting…"}
@@ -1337,7 +1368,6 @@ function ChatPanel({ account }:{ account?: string }) {
     </div>
   );
 }
-
 // ===== Styles =====
 const styles: Record<string, React.CSSProperties> = {
   wrap: {
