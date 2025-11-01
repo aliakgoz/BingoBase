@@ -247,6 +247,10 @@ export default function App() {
   const pulling = useRef(false);
   const nowSec  = Math.floor(Date.now() / 1000);
 
+  // === WATCHDOG & GAP-FILL state ===
+  const lastEventAtRef = useRef<number>(Date.now());   // son canlı sinyal (ws block/event)
+  const lastHandledBlockRef = useRef<number>(0);       // en son işlenen block
+
   // diagnose bytecode & chainId
   useEffect(() => {
     (async () => {
@@ -298,12 +302,23 @@ export default function App() {
     if (!read) return;
     let stop = false;
     const tick = async () => {
-      try { const bn = await read.getBlockNumber(); if (!stop) setLatestBlock(bn); } catch {}
+      try {
+        const bn = await read.getBlockNumber();
+        if (!stop) {
+          setLatestBlock(bn);
+          lastHandledBlockRef.current = Math.max(lastHandledBlockRef.current, Number(bn));
+          lastEventAtRef.current = Date.now();
+        }
+      } catch {}
       if (!stop) setTimeout(tick, readWs ? 1000 : 3000);
     };
     tick();
     if (readWs) {
-      const onBlock = (b: number) => setLatestBlock(b);
+      const onBlock = (b: number) => {
+        setLatestBlock(b);
+        lastEventAtRef.current = Date.now();
+        lastHandledBlockRef.current = Math.max(lastHandledBlockRef.current, Number(b));
+      };
       readWs.on("block", onBlock);
       return () => { stop = true; readWs.off("block", onBlock); };
     }
@@ -440,7 +455,60 @@ export default function App() {
     }
   }, [bingo, usdc, account, lastPayout, lastDrawn, latestBlock]);
 
-  // polling loop
+  // ===== GAP-FILL: kopuklukta kaçan eventleri geriden tamamlama
+  async function gapFill(fromHint?: number) {
+    try {
+      if (!bingo || !read) return;
+      const latest = await read.getBlockNumber();
+      const from = Math.max(0, (fromHint ?? lastHandledBlockRef.current) - 2); // küçük tampon
+      if (from >= latest) return;
+
+      const rid = Number(await bingo.currentRoundId()).valueOf();
+
+      const fDraw   = (bingo as any).filters?.Draw?.(rid);
+      const fPay    = (bingo as any).filters?.Payout?.(rid);
+      const fVRF    = (bingo as any).filters?.VRFFulfilled?.(rid);
+      const fCreate = (bingo as any).filters?.RoundCreated?.();
+
+      const [logsD, logsP, logsV, logsC] = await Promise.all([
+        fDraw   ? (bingo as any).queryFilter(fDraw,   from, latest) : [],
+        fPay    ? (bingo as any).queryFilter(fPay,    from, latest) : [],
+        fVRF    ? (bingo as any).queryFilter(fVRF,    from, latest) : [],
+        fCreate ? (bingo as any).queryFilter(fCreate, from, latest) : [],
+      ]);
+
+      for (const lg of logsD) {
+        const n  = Number(lg.args?.number ?? lg.args?.[1]);
+        const tx = lg.transactionHash as string | undefined;
+        setLastDrawn(n);
+        setDrawFeed(prev => [{ n, tx, ts: Date.now() }, ...prev].slice(0,5));
+      }
+
+      const lastPay = logsP.slice(-1)[0];
+      if (lastPay) {
+        const [ridX, winner, winnerUSDC, feeUSDC] = lastPay.args || [];
+        setLastPayout({
+          roundId: Number(ridX),
+          winner: String(winner),
+          winnerUSDC: BigInt(winnerUSDC),
+          feeUSDC: BigInt(feeUSDC),
+          tx: lastPay.transactionHash as string | undefined,
+          ts: Date.now(),
+        });
+      }
+
+      if (logsV.length || logsC.length || logsD.length || logsP.length) {
+        await pullOnce();
+      }
+
+      lastHandledBlockRef.current = latest;
+      lastEventAtRef.current = Date.now();
+    } catch (e) {
+      console.warn("gapFill error:", e);
+    }
+  }
+
+  // polling loop (HTTP ok; WSS olsa bile backup)
   useEffect(() => {
     let t: number;
     const loop = async () => {
@@ -500,6 +568,10 @@ export default function App() {
   // ===== Event subscriptions (WSS only) =====
   const onPayout = useCallback(async (_roundId: any, winner: string, winnerUSDC: bigint, feeUSDC: bigint, ev: any) => {
     try {
+      lastEventAtRef.current = Date.now();
+      if (ev?.log?.blockNumber != null) {
+        lastHandledBlockRef.current = Math.max(lastHandledBlockRef.current, Number(ev.log.blockNumber));
+      }
       const txHash: string | undefined = ev?.log?.transactionHash || ev?.transactionHash;
       setLastPayout({
         roundId: Number(_roundId),
@@ -517,6 +589,11 @@ export default function App() {
     if (!events) return;
 
     const onDraw = async (_roundId: any, number: number, _idx: number, ev: any) => {
+      lastEventAtRef.current = Date.now();
+      if (ev?.log?.blockNumber != null) {
+        lastHandledBlockRef.current = Math.max(lastHandledBlockRef.current, Number(ev.log.blockNumber));
+      }
+
       const n = Number(number);
       setLastDrawn(n);
       try {
@@ -528,7 +605,14 @@ export default function App() {
       await pullOnce();
     };
 
-    const onAny = async () => { await pullOnce(); };
+    const onAny = async (...args:any[]) => {
+      lastEventAtRef.current = Date.now();
+      const maybeEv = args?.[args.length - 1];
+      if (maybeEv?.log?.blockNumber != null) {
+        lastHandledBlockRef.current = Math.max(lastHandledBlockRef.current, Number(maybeEv.log.blockNumber));
+      }
+      await pullOnce();
+    };
 
     (events as any).on("Draw", onDraw);
     (events as any).on("VRFFulfilled", onAny);
@@ -542,6 +626,56 @@ export default function App() {
       (events as any).off("Payout", onPayout);
     };
   }, [events, onPayout, pullOnce]);
+
+  // === WS liveness watchdog: 5s aralıkla kontrol et, 15s sessizlikte re-subscribe + gapFill
+  useEffect(() => {
+    let t = window.setInterval(async () => {
+      if (!readWs || !events) { await pullOnce(); return; }
+
+      const silenceMs = Date.now() - lastEventAtRef.current;
+      if (silenceMs > 15000) {
+        console.warn("WS stalled ~", silenceMs, "ms → resubscribe");
+
+        // 1) eski WS’yi bırak
+        try { (events as any).removeAllListeners?.(); } catch {}
+        try { readWs.destroy?.(); } catch {}
+
+        // 2) yeni WS provider’ı kur
+        const fresh = new WebSocketProvider(RPC_WSS);
+        // 3) contract’ı WS ile yeniden kur
+        const newEvents = new Contract(CONTRACT_ADDRESS, BINGO_ABI, fresh);
+        setEvents(newEvents as any);
+
+        // 4) block listener yeniden
+        fresh.on("block", (b: number) => {
+          setLatestBlock(b);
+          lastEventAtRef.current = Date.now();
+          lastHandledBlockRef.current = Math.max(lastHandledBlockRef.current, Number(b));
+        });
+
+        // 5) kaçanları tamamla
+        await gapFill();
+
+        // 6) durum çek
+        await pullOnce();
+      }
+    }, 5000);
+
+    return () => window.clearInterval(t);
+  }, [events, readWs, pullOnce]);
+
+  // Tab görünür olunca anında toparla
+  useEffect(() => {
+    const onVis = async () => {
+      if (!document.hidden) { await gapFill(); await pullOnce(); }
+    };
+    document.addEventListener("visibilitychange", onVis);
+    window.addEventListener("focus", onVis);
+    return () => {
+      document.removeEventListener("visibilitychange", onVis);
+      window.removeEventListener("focus", onVis);
+    };
+  }, [pullOnce]);
 
   // signer helper
   const withSigner = async (c: Contract) => {
